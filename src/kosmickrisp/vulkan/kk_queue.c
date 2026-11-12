@@ -46,6 +46,11 @@ kk_queue_release_cmd_buffer_locked(struct kk_queue *queue,
 static void
 check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
 {
+   if (unlikely(dev->sync_debug.enabled)) {
+      p_atomic_inc(&dev->sync_debug.completed);
+      if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE)
+         dev->sync_debug.last_error = data->error;
+   }
    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
       vk_device_set_lost(
          &dev->vk, "Command queue error: %s, with message \"%s\"",
@@ -102,6 +107,8 @@ kk_queue_commit(struct kk_queue *queue, struct kk_cmd_buffer *cmd,
    assert(kk_cmd_buffer_has_work(cmd));
 
    KK_RT_STATS_ADD(kk_queue_device(queue), KK_RT_STAT_CMDS_COMMITTED, 1);
+   if (unlikely(kk_queue_device(queue)->sync_debug.enabled))
+      p_atomic_inc(&kk_queue_device(queue)->sync_debug.committed);
 
    mtl_commit_options *options = mtl_new_commit_options();
    mtl_commit_options_add_feedback_handler(options, callback, user_data);

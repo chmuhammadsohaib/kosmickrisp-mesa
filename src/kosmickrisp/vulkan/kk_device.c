@@ -352,6 +352,8 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (dev->residency_set.handle == NULL)
       goto fail_compiler;
 
+   dev->sync_debug.enabled = debug_get_bool_option("KK_SYNC_DEBUG", false);
+
    result = kk_rt_stats_init(dev);
    if (result != VK_SUCCESS)
       goto fail_residency_set;

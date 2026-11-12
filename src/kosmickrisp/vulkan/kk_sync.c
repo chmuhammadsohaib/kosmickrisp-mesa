@@ -10,6 +10,11 @@
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
+#include "util/u_atomic.h"
+
+#include <inttypes.h>
+#include <stdio.h>
+
 static VkResult
 kk_timeline_init(struct vk_device *device, struct vk_sync *sync,
                  uint64_t initial_value)
@@ -76,6 +81,32 @@ kk_timeline_wait(struct vk_device *device, struct vk_sync *sync,
       timeout_ms =
          (rel_timeout_ns / 1000000) + (rel_timeout_ns % 1000000 ? 1 : 0);
    }
+   struct kk_device *dev = container_of(device, struct kk_device, vk);
+   if (unlikely(dev->sync_debug.enabled) &&
+       abs_timeout_ns == OS_TIMEOUT_INFINITE) {
+      /* Wait in slices and say what the queue has done whenever one runs out:
+       * whether the GPU still has work (or failed), or nothing that would
+       * signal this value was ever submitted. */
+      const uint64_t slice_ms = 5000u;
+      for (uint32_t stalled = 1u;; stalled++) {
+         if (mtl_shared_event_wait_until_signaled_value(timeline->mtl_handle,
+                                                        wait_value, slice_ms))
+            return VK_SUCCESS;
+         const uint64_t committed = p_atomic_read(&dev->sync_debug.committed);
+         const uint64_t completed = p_atomic_read(&dev->sync_debug.completed);
+         fprintf(stderr,
+                 "[kk] sync-debug: wait stalled %us on timeline %p for %" PRIu64
+                 ", signaled %" PRIu64 "; command buffers committed %" PRIu64
+                 ", completed %" PRIu64 " (%" PRIu64
+                 " in flight), last GPU error %d\n",
+                 stalled * (unsigned)(slice_ms / 1000u), (void *)timeline,
+                 wait_value,
+                 mtl_shared_event_get_signaled_value(timeline->mtl_handle),
+                 committed, completed, committed - completed,
+                 dev->sync_debug.last_error);
+      }
+   }
+
    int completed = mtl_shared_event_wait_until_signaled_value(
       timeline->mtl_handle, wait_value, timeout_ms);
 

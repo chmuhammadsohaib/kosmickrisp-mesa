@@ -150,6 +150,15 @@ struct kk_device {
    /* KK_RT_STATS, NULL when off; see kk_rt_stats.c */
    struct kk_rt_stats *rt_stats;
 
+   /* KK_SYNC_DEBUG: CPU waits that stall log what the queue has done; see
+    * kk_timeline_wait */
+   struct {
+      bool enabled;
+      uint64_t committed;
+      uint64_t completed;
+      int last_error;
+   } sync_debug;
+
    /* Sparse memory, for unmapping pages; see kk_sparse.c */
    struct kk_bo *sparse_unmap_bo;
 
