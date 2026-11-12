@@ -7,3 +7,7 @@
 /build
 .venv/
 *.mda.tar
+
+# build-kosmickrisp.sh
+/build-kk/
+/dist/

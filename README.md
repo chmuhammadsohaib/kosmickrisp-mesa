@@ -31,16 +31,44 @@ Most additions are opt-in with environment variables, so with none set the drive
 
 ## Building
 
-Same as upstream KosmicKrisp:
+On an Apple silicon Mac with macOS 26 or later (KosmicKrisp needs Metal 4):
+
+1. Install the Xcode command line tools and the build dependencies with [Homebrew](https://brew.sh):
+
+   ```sh
+   xcode-select --install
+   brew install llvm spirv-llvm-translator spirv-tools glslang bison ninja pkgconf python
+   ```
+
+2. Build:
+
+   ```sh
+   ./build-kosmickrisp.sh            # arm64, for native apps
+   ./build-kosmickrisp.sh x86_64     # for apps under Rosetta, such as Wine/CrossOver games
+   ./build-kosmickrisp.sh universal  # both in one library
+   ```
+
+   The script puts Meson and Mesa's Python modules in a virtual environment under `build-kk/`. For x86_64 it builds
+   Mesa's compiler tools natively first, then cross-builds the driver. A first build takes a few minutes.
+
+3. The output is in `dist/<target>/`:
+
+   | File | What it is |
+   |---|---|
+   | `libvulkan_kosmickrisp.dylib` | The Vulkan driver |
+   | `kosmickrisp_icd.json` | Its Vulkan ICD manifest, pointing at the dylib |
+
+   Use it through the Vulkan loader, for example
+   `VK_DRIVER_FILES=$PWD/dist/arm64/kosmickrisp_icd.json vkcube`. Wine/CrossOver games need the x86_64 or
+   universal build and a Vulkan loader in the Wine environment; set `VK_DRIVER_FILES` there.
+
+To build by hand instead, the native build is upstream KosmicKrisp's:
 
 ```sh
-meson setup build -Dbuildtype=debugoptimized -Dplatforms=macos -Dvulkan-drivers=kosmickrisp \
-  -Dgallium-drivers= -Dopengl=false -Dzstd=disabled -Dmesa-clc=enabled -Dprecomp-compiler=enabled
+meson setup build -Dbuildtype=release -Dplatforms=macos -Dvulkan-drivers=kosmickrisp -Dgallium-drivers= \
+  -Dopengl=false -Dzstd=disabled -Dmesa-clc=enabled -Dprecomp-compiler=enabled
 ninja -C build src/kosmickrisp/vulkan/libvulkan_kosmickrisp.dylib
 ```
-
-Point the Vulkan loader at it with an ICD manifest (`VK_DRIVER_FILES`). Under CrossOver/Wine, which runs games as
-x86_64 under Rosetta, build the driver for x86_64 (a cross file with `-arch x86_64`).
 
 ## Tested
 
