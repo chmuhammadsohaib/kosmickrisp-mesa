@@ -59,6 +59,10 @@ struct kk_env_settings {
    /* KK_NVX=1: expose VK_NVX_binary_import and VK_NVX_image_view_handle for
     * the MetalFX upscaling work (logging stubs for now) */
    bool nvx_enabled;
+   /* KK_QUEUE_COUNT=n (1 to 4): queues in the queue family. Streamline's
+    * DLSS Frame Generation needs a second one; more than one changes how
+    * games schedule work, so it's opt-in. */
+   uint32_t queue_count;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
 };

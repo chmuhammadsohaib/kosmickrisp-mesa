@@ -98,6 +98,10 @@ struct kk_device {
 
    bool has_queue;
    struct kk_queue queue;
+   /* Queues 1 and up of the family (KK_QUEUE_COUNT); internal work and
+    * presentation use queue */
+   uint32_t extra_queue_count;
+   struct kk_queue extra_queues[KK_MAX_EXTRA_QUEUES];
 
    struct vk_meta_device meta;
 

@@ -1346,6 +1346,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
       debug_get_bool_option("KK_RAY_TRACING", false);
    settings->sparse_enabled = debug_get_bool_option("KK_SPARSE", false);
    settings->nvx_enabled = debug_get_bool_option("KK_NVX", false);
+   settings->queue_count =
+      CLAMP(debug_get_num_option("KK_QUEUE_COUNT", 1), 1, 1 + KK_MAX_EXTRA_QUEUES);
 
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";
@@ -1480,7 +1482,7 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
       .queue_flags =
          VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT |
          (pdev->settings.sparse_enabled ? VK_QUEUE_SPARSE_BINDING_BIT : 0),
-      .queue_count = 1,
+      .queue_count = pdev->settings.queue_count,
    };
    assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));
 

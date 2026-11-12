@@ -54,4 +54,7 @@ struct kk_addr_range {
    uint64_t range;
 };
 
+/* Queues beyond the first in the queue family (KK_QUEUE_COUNT) */
+#define KK_MAX_EXTRA_QUEUES 3
+
 #endif

@@ -371,11 +371,17 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    if (pCreateInfo->queueCreateInfoCount > 0) {
-      result =
-         kk_queue_init(dev, &dev->queue, &pCreateInfo->pQueueCreateInfos[0], 0);
+      const VkDeviceQueueCreateInfo *queue_info = &pCreateInfo->pQueueCreateInfos[0];
+      result = kk_queue_init(dev, &dev->queue, queue_info, 0);
       if (result != VK_SUCCESS)
          goto fail_vab_memory;
       dev->has_queue = true;
+      for (uint32_t i = 1; i < queue_info->queueCount && i <= KK_MAX_EXTRA_QUEUES; i++) {
+         result = kk_queue_init(dev, &dev->extra_queues[i - 1], queue_info, i);
+         if (result != VK_SUCCESS)
+            goto fail_queues;
+         dev->extra_queue_count = i;
+      }
    }
 
    result = kk_device_init_meta(dev);
@@ -412,6 +418,10 @@ fail_query_table:
 fail_meta:
    kk_device_finish_meta(dev);
 fail_mem_cache:
+fail_queues:
+   for (uint32_t i = 0; i < dev->extra_queue_count; i++)
+      kk_queue_finish(dev, &dev->extra_queues[i]);
+   dev->extra_queue_count = 0;
    if (dev->has_queue) {
       kk_queue_finish(dev, &dev->queue);
       dev->has_queue = false;
@@ -468,6 +478,9 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (dev->heap)
       kk_destroy_bo(dev, dev->heap);
 
+   for (uint32_t i = 0; i < dev->extra_queue_count; i++)
+      kk_queue_finish(dev, &dev->extra_queues[i]);
+   dev->extra_queue_count = 0;
    if (dev->has_queue) {
       kk_queue_finish(dev, &dev->queue);
       dev->has_queue = false;
