@@ -85,6 +85,7 @@ kk_files = files(
   'kk_image_layout.h',
   'kk_image_layout.c',
   'kk_image_view.h',
+  'kk_log_queries.h',
   'kk_image_view.c',
   'kk_image.h',
   'kk_image.c',
@@ -153,6 +154,7 @@ libkk = static_library(
   [
     kk_files,
     kk_entrypoints,
+    kk_log_queries,
     sha1_h,
   ],
   include_directories : [

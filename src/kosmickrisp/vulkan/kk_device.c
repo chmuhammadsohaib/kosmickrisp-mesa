@@ -7,6 +7,8 @@
 
 #include "kk_device.h"
 
+#include "kk_log_queries.h"
+
 #include "kk_buffer.h"
 #include "kk_buffer_view.h"
 #include "kk_cmd_buffer.h"
@@ -262,6 +264,48 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    VkResult result = VK_ERROR_OUT_OF_HOST_MEMORY;
    struct kk_device *dev;
 
+   if (kk_log_queries_enabled()) {
+      for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
+         fprintf(stderr, "[kk] vkCreateDevice extension %s\n",
+                 pCreateInfo->ppEnabledExtensionNames[i]);
+      for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
+         const VkDeviceQueueCreateInfo *q = &pCreateInfo->pQueueCreateInfos[i];
+         fprintf(stderr,
+                 "[kk] vkCreateDevice queue %u: family %u count %u flags 0x%x\n",
+                 i, q->queueFamilyIndex, q->queueCount, q->flags);
+         kk_log_chain_types("vkCreateDevice queue", q->pNext);
+      }
+      if (pCreateInfo->pEnabledFeatures)
+         kk_log_features("vkCreateDevice.pEnabledFeatures",
+                         pCreateInfo->pEnabledFeatures);
+      kk_log_chain_types("vkCreateDevice", pCreateInfo->pNext);
+      kk_log_chain("vkCreateDevice", pCreateInfo->pNext);
+   }
+
+   /* Extensions KK_REPORT_EXTENSIONS only advertises are left out */
+   VkDeviceCreateInfo filtered_info;
+   const char *filtered_exts[512];
+   if (pCreateInfo->enabledExtensionCount <= ARRAY_SIZE(filtered_exts)) {
+      uint32_t count = 0;
+      for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
+         const char *name = pCreateInfo->ppEnabledExtensionNames[i];
+         if (kk_extension_only_reported(pdev, name)) {
+            fprintf(stderr,
+                    "[kk] KK_REPORT_EXTENSIONS: the application enabled %s, "
+                    "which is only advertised; leaving it out\n",
+                    name);
+            continue;
+         }
+         filtered_exts[count++] = name;
+      }
+      if (count != pCreateInfo->enabledExtensionCount) {
+         filtered_info = *pCreateInfo;
+         filtered_info.enabledExtensionCount = count;
+         filtered_info.ppEnabledExtensionNames = filtered_exts;
+         pCreateInfo = &filtered_info;
+      }
+   }
+
    dev = vk_zalloc2(&pdev->vk.instance->alloc, pAllocator, sizeof(*dev), 8,
                     VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!dev)
@@ -433,9 +477,28 @@ kk_device_get_proc_addr(const struct kk_device *device, const char *name)
       return NULL;
 
    struct vk_instance *instance = device->vk.physical->instance;
-   return vk_device_dispatch_table_get_if_supported(
+   PFN_vkVoidFunction fn = vk_device_dispatch_table_get_if_supported(
       &device->exposed_dispatch_table, name, instance->app_info.api_version,
       &instance->enabled_extensions, &device->vk.enabled_extensions);
+   if (fn)
+      return fn;
+
+   /* Layers such as Wine's look commands up by their core name even when the
+    * application reached them through an extension, e.g.
+    * vkGetDeviceImageSparseMemoryRequirements through VK_KHR_maintenance4 on a
+    * Vulkan 1.1 instance. Resolve the core name when its alias is enabled; it
+    * is the same command. */
+   static const char *const suffixes[] = {"KHR", "EXT"};
+   for (unsigned i = 0; i < ARRAY_SIZE(suffixes); i++) {
+      char alias[256];
+      snprintf(alias, sizeof(alias), "%s%s", name, suffixes[i]);
+      fn = vk_device_dispatch_table_get_if_supported(
+         &device->exposed_dispatch_table, alias, instance->app_info.api_version,
+         &instance->enabled_extensions, &device->vk.enabled_extensions);
+      if (fn)
+         return fn;
+   }
+   return NULL;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL

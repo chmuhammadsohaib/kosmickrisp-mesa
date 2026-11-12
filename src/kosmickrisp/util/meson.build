@@ -28,3 +28,14 @@ kk_dispatch_cmd = custom_target(
   ],
   depend_files : vk_dispatch_trampolines_gen_depend_files,
 )
+
+kk_log_queries_gen = files('kk_log_queries_gen.py')
+
+kk_log_queries = custom_target(
+  'kk_log_queries',
+  input : [kk_log_queries_gen, vk_api_xml],
+  output : 'kk_log_queries.c',
+  command : [
+    prog_python, '@INPUT0@', '--xml', '@INPUT1@', '--out-c', '@OUTPUT@',
+  ],
+)

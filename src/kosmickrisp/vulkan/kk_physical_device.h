@@ -110,6 +110,9 @@ kk_regular_mem_types(const struct kk_physical_device *pdev)
           ~BITFIELD_BIT(pdev->sparse_mem_type);
 }
 
+bool kk_extension_only_reported(const struct kk_physical_device *pdev,
+                                const char *name);
+
 VkResult kk_enumerate_physical_devices(struct vk_instance *_instance);
 void kk_physical_device_destroy(struct vk_physical_device *vk_device);
 

@@ -7,6 +7,8 @@
 
 #include "kk_physical_device.h"
 
+#include "kk_log_queries.h"
+
 #include "kk_acceleration_structure.h"
 
 #include "kk_debug.h"
@@ -31,6 +33,7 @@
 #include "vk_drm_syncobj.h"
 #include "vk_shader_module.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,6 +73,126 @@ kk_apply_vendor_identity(struct vk_properties *properties)
       properties->deviceID = device;
    if (count >= 3)
       properties->driverVersion = version;
+}
+
+/* kosmickrisp-compat-switches: KK_DRIVER_ID sets the driver identity the game sees
+ * (VkPhysicalDeviceDriverProperties and driverVersion). radv, amd and nvidia are presets with
+ * that driver's name, info and a driverVersion in its own format; a number sets only driverID.
+ * Applied after KK_VENDOR_ID, so a preset's driverVersion wins. Capabilities don't change. */
+static void
+kk_apply_driver_identity(struct vk_properties *properties)
+{
+   const char *value = getenv("KK_DRIVER_ID");
+   if (!value || !value[0])
+      return;
+   if (strcmp(value, "radv") == 0) {
+      properties->driverID = VK_DRIVER_ID_MESA_RADV;
+      properties->driverVersion = VK_MAKE_API_VERSION(0, 24, 2, 0); /* Mesa 24.2.0 */
+      snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "radv");
+      snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE, "Mesa 24.2.0");
+      return;
+   }
+   if (strcmp(value, "amd") == 0) {
+      properties->driverID = VK_DRIVER_ID_AMD_PROPRIETARY;
+      properties->driverVersion = VK_MAKE_API_VERSION(0, 2, 0, 302);
+      snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "AMD proprietary driver");
+      snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE, "24.10.1");
+      return;
+   }
+   if (strcmp(value, "nvidia") == 0) {
+      properties->driverID = VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+      properties->driverVersion = 0x8C178000; /* 560.94 in NVIDIA's version packing */
+      snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "NVIDIA");
+      snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE, "560.94");
+      return;
+   }
+   char *end;
+   unsigned long id = strtoul(value, &end, 0);
+   if (end != value && *end == '\0')
+      properties->driverID = (VkDriverId)id;
+}
+
+/* kosmickrisp-compat-switches: KK_REPORT_EXTENSIONS=<comma list> makes
+ * vkEnumerateDeviceExtensionProperties also list those device extensions. They are advertised
+ * only: vkCreateDevice leaves them out with a warning (kk_extension_only_reported). */
+static bool
+kk_reported_extension_listed(const char *name)
+{
+   const char *value = getenv("KK_REPORT_EXTENSIONS");
+   if (!value || !value[0])
+      return false;
+
+   const size_t len = strlen(name);
+   for (const char *c = value; *c;) {
+      c += strspn(c, ", ");
+      const size_t n = strcspn(c, ", ");
+      if (n == len && strncmp(c, name, n) == 0)
+         return true;
+      c += n;
+   }
+   return false;
+}
+
+static int
+kk_device_extension_index(const char *name)
+{
+   for (int i = 0; i < VK_DEVICE_EXTENSION_COUNT; i++) {
+      if (strcmp(vk_device_extensions[i].extensionName, name) == 0)
+         return i;
+   }
+   return -1;
+}
+
+bool
+kk_extension_only_reported(const struct kk_physical_device *pdev,
+                           const char *name)
+{
+   const int index = kk_device_extension_index(name);
+   const bool supported =
+      index >= 0 && pdev->vk.supported_extensions.extensions[index];
+   return !supported && kk_reported_extension_listed(name);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+kk_EnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice,
+                                      const char *pLayerName,
+                                      uint32_t *pPropertyCount,
+                                      VkExtensionProperties *pProperties)
+{
+   VK_FROM_HANDLE(kk_physical_device, pdev, physicalDevice);
+   const char *value = getenv("KK_REPORT_EXTENSIONS");
+
+   if (pLayerName || !value || !value[0])
+      return vk_common_EnumerateDeviceExtensionProperties(
+         physicalDevice, pLayerName, pPropertyCount, pProperties);
+
+   VK_OUTARRAY_MAKE_TYPED(VkExtensionProperties, out, pProperties,
+                          pPropertyCount);
+
+   for (int i = 0; i < VK_DEVICE_EXTENSION_COUNT; i++) {
+      if (!pdev->vk.supported_extensions.extensions[i])
+         continue;
+      vk_outarray_append_typed(VkExtensionProperties, &out, prop)
+         *prop = vk_device_extensions[i];
+   }
+
+   char list[1024];
+   snprintf(list, sizeof(list), "%s", value);
+   for (char *saved = NULL, *name = strtok_r(list, ", ", &saved); name;
+        name = strtok_r(NULL, ", ", &saved)) {
+      if (!kk_extension_only_reported(pdev, name))
+         continue;
+      const int index = kk_device_extension_index(name);
+      vk_outarray_append_typed(VkExtensionProperties, &out, prop)
+      {
+         *prop = (VkExtensionProperties){
+            .specVersion = index >= 0 ? vk_device_extensions[index].specVersion : 1,
+         };
+         snprintf(prop->extensionName, sizeof(prop->extensionName), "%s", name);
+      }
+   }
+
+   return vk_outarray_status(&out);
 }
 
 static uint32_t
@@ -1059,6 +1182,18 @@ kk_get_device_properties(
    snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,
             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
    kk_apply_vendor_identity(properties);
+   kk_apply_driver_identity(properties);
+
+   if (kk_log_queries_enabled()) {
+      fprintf(stderr,
+              "[kk] identity: vendorID 0x%04x deviceID 0x%04x deviceName \"%s\" "
+              "driverID %d (%s) driverName \"%s\" driverInfo \"%s\" "
+              "driverVersion 0x%08x\n",
+              properties->vendorID, properties->deviceID, properties->deviceName,
+              (int)properties->driverID,
+              vk_DriverId_to_str(properties->driverID), properties->driverName,
+              properties->driverInfo, properties->driverVersion);
+   }
 }
 
 static void
@@ -1357,9 +1492,142 @@ kk_physical_device_destroy(struct vk_physical_device *vk_pdev)
    vk_free(&pdev->vk.instance->alloc, pdev);
 }
 
+static void
+kk_get_physical_device_properties2(VkPhysicalDevice physicalDevice,
+                                   VkPhysicalDeviceProperties2 *pProperties);
+
 VKAPI_ATTR void VKAPI_CALL
 kk_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
                                 VkPhysicalDeviceProperties2 *pProperties)
+{
+   if (kk_log_queries_enabled())
+      kk_log_chain_types("vkGetPhysicalDeviceProperties2", pProperties->pNext);
+
+   kk_get_physical_device_properties2(physicalDevice, pProperties);
+
+   if (kk_log_queries_enabled()) {
+      kk_log_properties("vkGetPhysicalDeviceProperties2.properties",
+                        &pProperties->properties);
+      kk_log_chain("vkGetPhysicalDeviceProperties2", pProperties->pNext);
+   }
+}
+
+/* VkPhysicalDeviceFeatures members, in order; the struct is only VkBool32s */
+static const char *const kk_core_feature_names[] = {
+   "robustBufferAccess",
+   "fullDrawIndexUint32",
+   "imageCubeArray",
+   "independentBlend",
+   "geometryShader",
+   "tessellationShader",
+   "sampleRateShading",
+   "dualSrcBlend",
+   "logicOp",
+   "multiDrawIndirect",
+   "drawIndirectFirstInstance",
+   "depthClamp",
+   "depthBiasClamp",
+   "fillModeNonSolid",
+   "depthBounds",
+   "wideLines",
+   "largePoints",
+   "alphaToOne",
+   "multiViewport",
+   "samplerAnisotropy",
+   "textureCompressionETC2",
+   "textureCompressionASTC_LDR",
+   "textureCompressionBC",
+   "occlusionQueryPrecise",
+   "pipelineStatisticsQuery",
+   "vertexPipelineStoresAndAtomics",
+   "fragmentStoresAndAtomics",
+   "shaderTessellationAndGeometryPointSize",
+   "shaderImageGatherExtended",
+   "shaderStorageImageExtendedFormats",
+   "shaderStorageImageMultisample",
+   "shaderStorageImageReadWithoutFormat",
+   "shaderStorageImageWriteWithoutFormat",
+   "shaderUniformBufferArrayDynamicIndexing",
+   "shaderSampledImageArrayDynamicIndexing",
+   "shaderStorageBufferArrayDynamicIndexing",
+   "shaderStorageImageArrayDynamicIndexing",
+   "shaderClipDistance",
+   "shaderCullDistance",
+   "shaderFloat64",
+   "shaderInt64",
+   "shaderInt16",
+   "shaderResourceResidency",
+   "shaderResourceMinLod",
+   "sparseBinding",
+   "sparseResidencyBuffer",
+   "sparseResidencyImage2D",
+   "sparseResidencyImage3D",
+   "sparseResidency2Samples",
+   "sparseResidency4Samples",
+   "sparseResidency8Samples",
+   "sparseResidency16Samples",
+   "sparseResidencyAliased",
+   "variableMultisampleRate",
+   "inheritedQueries",
+};
+static_assert(ARRAY_SIZE(kk_core_feature_names) * sizeof(VkBool32) ==
+                 sizeof(VkPhysicalDeviceFeatures),
+              "kk_core_feature_names covers VkPhysicalDeviceFeatures");
+
+/* kosmickrisp-compat-switches: KK_REPORT_FEATURES=<comma list>|all reports those core
+ * VkPhysicalDeviceFeatures as supported, for games that refuse to start without them.
+ * Capabilities don't change: vkCreateDevice drops enabled features the GPU lacks (vk_device.c). */
+static void
+kk_apply_reported_features(VkPhysicalDeviceFeatures *features)
+{
+   const char *value = getenv("KK_REPORT_FEATURES");
+   if (!value || !value[0])
+      return;
+
+   VkBool32 *fields = (VkBool32 *)features;
+   if (strcmp(value, "all") == 0) {
+      for (unsigned i = 0; i < ARRAY_SIZE(kk_core_feature_names); i++)
+         fields[i] = VK_TRUE;
+      return;
+   }
+
+   static bool warned = false;
+   char list[1024];
+   snprintf(list, sizeof(list), "%s", value);
+   for (char *saved = NULL, *name = strtok_r(list, ", ", &saved); name;
+        name = strtok_r(NULL, ", ", &saved)) {
+      unsigned i = 0;
+      while (i < ARRAY_SIZE(kk_core_feature_names) &&
+             strcmp(name, kk_core_feature_names[i]) != 0)
+         i++;
+      if (i < ARRAY_SIZE(kk_core_feature_names))
+         fields[i] = VK_TRUE;
+      else if (!warned)
+         fprintf(stderr, "[kk] KK_REPORT_FEATURES: unknown feature \"%s\"\n", name);
+   }
+   warned = true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+kk_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
+                              VkPhysicalDeviceFeatures2 *pFeatures)
+{
+   if (kk_log_queries_enabled())
+      kk_log_chain_types("vkGetPhysicalDeviceFeatures2", pFeatures->pNext);
+
+   vk_common_GetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+   kk_apply_reported_features(&pFeatures->features);
+
+   if (kk_log_queries_enabled()) {
+      kk_log_features("vkGetPhysicalDeviceFeatures2.features",
+                      &pFeatures->features);
+      kk_log_chain("vkGetPhysicalDeviceFeatures2", pFeatures->pNext);
+   }
+}
+
+static void
+kk_get_physical_device_properties2(VkPhysicalDevice physicalDevice,
+                                   VkPhysicalDeviceProperties2 *pProperties)
 {
    vk_common_GetPhysicalDeviceProperties2(physicalDevice, pProperties);
 
@@ -1433,6 +1701,22 @@ kk_GetPhysicalDeviceMemoryProperties2(
          break;
       }
    }
+
+   if (kk_log_queries_enabled()) {
+      const VkPhysicalDeviceMemoryProperties *mem =
+         &pMemoryProperties->memoryProperties;
+      for (uint32_t i = 0; i < mem->memoryHeapCount; i++)
+         fprintf(stderr,
+                 "[kk] vkGetPhysicalDeviceMemoryProperties heap %u: size %" PRIu64
+                 " flags 0x%x\n",
+                 i, (uint64_t)mem->memoryHeaps[i].size, mem->memoryHeaps[i].flags);
+      for (uint32_t i = 0; i < mem->memoryTypeCount; i++)
+         fprintf(stderr,
+                 "[kk] vkGetPhysicalDeviceMemoryProperties type %u: heap %u "
+                 "flags 0x%x\n",
+                 i, mem->memoryTypes[i].heapIndex,
+                 mem->memoryTypes[i].propertyFlags);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1477,6 +1761,17 @@ kk_GetPhysicalDeviceQueueFamilyProperties2(
                break;
             }
          }
+      }
+   }
+
+   if (kk_log_queries_enabled() && pQueueFamilyProperties) {
+      for (uint32_t i = 0; i < *pQueueFamilyPropertyCount; i++) {
+         const VkQueueFamilyProperties *p =
+            &pQueueFamilyProperties[i].queueFamilyProperties;
+         fprintf(stderr,
+                 "[kk] vkGetPhysicalDeviceQueueFamilyProperties family %u: "
+                 "flags 0x%x queueCount %u\n",
+                 i, p->queueFlags, p->queueCount);
       }
    }
 }
