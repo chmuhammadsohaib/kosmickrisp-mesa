@@ -10,6 +10,8 @@
 
 #include "kk_private.h"
 
+#include "kk_rt_stats.h"
+
 #include "kk_descriptor_set.h"
 #include "kk_image.h"
 #include "kk_nir_lower_vbo.h"
@@ -271,6 +273,8 @@ struct kk_cmd_buffer {
 
    /* Owned large BOs */
    struct util_dynarray large_bos;
+   /* Ray tracing stacks (struct kk_bo *), given back to the device on reset */
+   struct util_dynarray rt_stacks;
 
    /* Does the command buffer use the geometry heap? */
    bool uses_heap;
@@ -280,6 +284,8 @@ struct kk_cmd_buffer {
    /* Metal command buffers are single-shot: a resubmission must re-record
     * by replaying the enqueued commands (see rerecord_cmd_buffer). */
    bool submitted;
+   /* KK_RT_STATS counts of this recording */
+   struct kk_rt_stats_cmd rt_stats;
 };
 
 VK_DEFINE_HANDLE_CASTS(kk_cmd_buffer, vk.base, VkCommandBuffer,

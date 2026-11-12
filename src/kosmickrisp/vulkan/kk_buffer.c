@@ -92,17 +92,28 @@ kk_GetDeviceBufferMemoryRequirements(
 
    const bool sparse =
       pInfo->pCreateInfo->flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT;
-   const uint64_t alignment =
+   uint64_t alignment =
       sparse ? MTL_SPARSE_PAGE_SIZE_B
              : kk_get_buffer_alignment(pdev, pInfo->pCreateInfo->size,
                                        pInfo->pCreateInfo->usage,
                                        pInfo->pCreateInfo->flags);
+   uint32_t memory_types = sparse ? BITFIELD_BIT(pdev->private_mem_type)
+                                  : kk_regular_mem_types(pdev);
+
+   /* Acceleration structures can be placed in their buffer's memory if it's
+    * private, at multiples of MTL_AS_PLACEMENT_ALIGN_B, and their sizes are
+    * multiples of it too (kk_acceleration_structure.c). */
+   if (!sparse && pdev->settings.ray_tracing_enabled &&
+       (vk_buffer_usage_flags(pInfo->pCreateInfo) &
+        VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR)) {
+      alignment = MAX2(alignment, MTL_AS_PLACEMENT_ALIGN_B);
+      memory_types |= BITFIELD_BIT(pdev->private_mem_type);
+   }
 
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements){
       .size = align64(pInfo->pCreateInfo->size, alignment),
       .alignment = alignment,
-      .memoryTypeBits = sparse ? BITFIELD_BIT(pdev->sparse_mem_type)
-                               : kk_regular_mem_types(pdev),
+      .memoryTypeBits = memory_types,
    };
 
    vk_foreach_struct(sType, ext, pMemoryRequirements->pNext) {
@@ -175,6 +186,9 @@ kk_bind_buffer_memory(struct kk_device *dev, const VkBindBufferMemoryInfo *info)
    VK_FROM_HANDLE(kk_device_memory, mem, info->memory);
    VK_FROM_HANDLE(kk_buffer, buffer, info->buffer);
 
+   buffer->bo = mem->bo;
+   buffer->bo_offset = info->memoryOffset;
+
    if (mem->bo->mtl_handle) {
       buffer->metal.handle = mtl_new_buffer_with_length(
          mem->bo->mtl_handle, buffer->vk.size, info->memoryOffset);
@@ -193,8 +207,9 @@ kk_bind_buffer_memory(struct kk_device *dev, const VkBindBufferMemoryInfo *info)
    buffer->vk.device_address =
       mtl_buffer_get_gpu_address(buffer->metal.handle) + buffer->metal.offset;
    /* We need Metal to give us a CPU mapping so it correctly captures the
-    * data in the GPU debugger... */
-   mtl_get_contents(buffer->metal.handle);
+    * data in the GPU debugger... Private memory has none. */
+   if (!mem->bo->private_heap)
+      mtl_get_contents(buffer->metal.handle);
 
    return VK_SUCCESS;
 }

@@ -9,7 +9,8 @@
 
 /* Ray tracing stages keep payloads, callable data and hit attributes in device
  * memory (see msl_rt.c): the incoming ones are in the stage's kk_rt_call
- * frame, the outgoing ones in an area right after it. This pass turns every
+ * frame, the outgoing ones in an area right after it. Shader record buffers
+ * are global memory at the record's address. This pass turns every
  * deref of those variables into a cast from the matching address. Global
  * memory lowering does the rest, turning the payload derefs trace_ray and
  * execute_callable take into the addresses nir_to_msl passes on. */
@@ -106,6 +107,21 @@ msl_nir_lower_rt_io(nir_shader *nir)
                continue;
 
             nir_deref_instr *deref = nir_instr_as_deref(instr);
+
+            /* spirv_to_nir casts the shader record pointer as constant
+             * memory, which is only lowered for real constants; it is
+             * global memory here. */
+            if (deref->deref_type == nir_deref_type_cast &&
+                deref->modes == nir_var_mem_constant) {
+               nir_intrinsic_instr *ptr = nir_src_as_intrinsic(deref->parent);
+               if (ptr &&
+                   ptr->intrinsic == nir_intrinsic_load_shader_record_ptr) {
+                  deref->modes = nir_var_mem_global;
+                  progress = true;
+               }
+               continue;
+            }
+
             if (deref->deref_type != nir_deref_type_var)
                continue;
 

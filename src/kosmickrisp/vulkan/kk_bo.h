@@ -23,6 +23,9 @@ struct kk_bo {
    uint64_t size_B;
    uint64_t gpu; // GPU address
    void *cpu;    // CPU address
+   /* A private placement heap (kk_alloc_private_bo), which acceleration
+    * structures can be placed in */
+   bool private_heap;
 };
 
 struct kk_ptr {
@@ -36,9 +39,10 @@ struct kk_ptr {
 
 VkResult kk_alloc_bo(struct kk_device *dev, struct vk_object_base *log_obj,
                      uint64_t size_B, uint64_t align_B, struct kk_bo **bo_out);
-/* Private memory for sparse resources to map pages of. It has neither a CPU
- * mapping nor a GPU address of its own. */
-VkResult kk_alloc_sparse_bo(struct kk_device *dev,
+/* Private memory, for sparse resources to map pages of and acceleration
+ * structures to be placed in. It has neither a CPU mapping nor a GPU address
+ * of its own. */
+VkResult kk_alloc_private_bo(struct kk_device *dev,
                             struct vk_object_base *log_obj, uint64_t size_B,
                             struct kk_bo **bo_out);
 

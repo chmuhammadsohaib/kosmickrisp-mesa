@@ -6,6 +6,7 @@
  */
 
 #include "kk_queue.h"
+#include "kk_rt_stats.h"
 
 #include "kk_sparse.h"
 #include "kk_buffer.h"
@@ -55,7 +56,9 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
 static void
 commit_callback(struct mtl_feedback_data *data)
 {
-   check_device_lost((struct kk_device *)data->user_data, data);
+   struct kk_device *dev = (struct kk_device *)data->user_data;
+   check_device_lost(dev, data);
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_CMDS_COMPLETED, 1);
 }
 
 static void
@@ -66,6 +69,7 @@ rerecord_commit_callback(struct mtl_feedback_data *data)
    struct kk_device *dev = kk_queue_device(queue);
 
    check_device_lost(dev, data);
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_CMDS_COMPLETED, 1);
 
    /* Completion callbacks are called from multiple threads, so we need to
     * ensure the access to queue resources is safe. */
@@ -96,6 +100,8 @@ kk_queue_commit(struct kk_queue *queue, struct kk_cmd_buffer *cmd,
                 mtl_feedback_handler_callback callback, void *user_data)
 {
    assert(kk_cmd_buffer_has_work(cmd));
+
+   KK_RT_STATS_ADD(kk_queue_device(queue), KK_RT_STAT_CMDS_COMMITTED, 1);
 
    mtl_commit_options *options = mtl_new_commit_options();
    mtl_commit_options_add_feedback_handler(options, callback, user_data);
@@ -161,6 +167,9 @@ rerecord_and_commit_cmd_buffer(struct kk_queue *queue,
    /* Need to ensure the new buffers allocated at record are resident. */
    kk_device_make_resources_resident(dev);
 
+   if (unlikely(dev->rt_stats))
+      kk_rt_stats_add_cmd(dev, rerecord);
+
    queue->commits_in_flight++;
    kk_queue_commit(queue, rerecord, rerecord_commit_callback, commit);
 
@@ -182,6 +191,10 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 
    if (vk_queue_is_lost(&queue->vk))
       return VK_ERROR_DEVICE_LOST;
+
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_SUBMITS, 1);
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_VK_CMDS_SUBMITTED,
+                   submit->command_buffer_count);
 
    for (struct vk_sync_wait *wait = submit->waits,
                             *end = submit->waits + submit->wait_count;
@@ -217,6 +230,8 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
          if (result != VK_SUCCESS)
             return result;
       } else if (kk_cmd_buffer_has_work(cmd_buffer)) {
+         if (unlikely(dev->rt_stats))
+            kk_rt_stats_add_cmd(dev, cmd_buffer);
          kk_queue_commit(queue, cmd_buffer, commit_callback, dev);
       }
 

@@ -21,6 +21,13 @@ mtl_new_acceleration_structure(mtl_device *device, uint64_t size_B)
    return NULL;
 }
 
+mtl_acceleration_structure *
+mtl_heap_new_acceleration_structure(mtl_heap *heap, uint64_t size_B,
+                                    uint64_t offset_B)
+{
+   return NULL;
+}
+
 
 uint64_t
 mtl_acceleration_structure_get_resource_id(mtl_acceleration_structure *as)

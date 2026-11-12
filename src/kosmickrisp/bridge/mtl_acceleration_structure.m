@@ -8,6 +8,7 @@
 #include <Metal/MTL4ComputeCommandEncoder.h>
 #include <Metal/MTLAccelerationStructure.h>
 #include <Metal/MTLDevice.h>
+#include <Metal/MTLHeap.h>
 
 static_assert(sizeof(struct mtl_indirect_instance_descriptor) ==
                  sizeof(MTLIndirectAccelerationStructureInstanceDescriptor),
@@ -130,6 +131,15 @@ mtl_new_acceleration_structure(mtl_device *device, uint64_t size_B)
    }
 }
 
+mtl_acceleration_structure *
+mtl_heap_new_acceleration_structure(mtl_heap *heap, uint64_t size_B,
+                                    uint64_t offset_B)
+{
+   @autoreleasepool {
+      id<MTLHeap> hp = (id<MTLHeap>)heap;
+      return [hp newAccelerationStructureWithSize:size_B offset:offset_B];
+   }
+}
 
 uint64_t
 mtl_acceleration_structure_get_resource_id(mtl_acceleration_structure *as)

@@ -130,6 +130,10 @@ struct kk_pipeline_handles {
       struct {
          mtl_binary_function *function;
          mtl_binary_function *intersection;
+         /* Device-wide visible function table index of function, and the
+          * intersection function's handle ID; see kk_rt_pipeline.c */
+         uint32_t slot;
+         uint64_t intersection_id;
       } rt;
    };
 };
@@ -153,6 +157,9 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
 extern const struct vk_device_shader_ops kk_device_shader_ops;
 
 /* kk_rt_pipeline.c */
+struct kk_device;
+VkResult kk_rt_register_shader(struct kk_device *dev, struct kk_shader *shader);
+void kk_rt_unregister_shader(struct kk_device *dev, struct kk_shader *shader);
 void kk_cmd_set_rt_state(struct vk_command_buffer *cmd_buffer,
                          struct vk_pipeline_layout *layout,
                          VkDeviceSize scratch_size, uint32_t ray_queries,

@@ -2914,6 +2914,8 @@ rt_emit_hit_params(struct nir_to_msl_ctx *ctx, bool triangle)
    P_IND(ctx, "uint instance_id [[instance_id]],\n");
    P_IND(ctx, "uint user_instance_id [[user_instance_id]],\n");
    P_IND(ctx, "uint geometry_id [[geometry_id]],\n");
+   P_IND(ctx, "uint instance_sbt_offset "
+              "[[instance_intersection_function_table_offset]],\n");
    if (triangle) {
       P_IND(ctx, "float2 barycentric [[barycentric_coord]],\n");
       P_IND(ctx, "bool front_facing [[front_facing]],\n");
@@ -2946,6 +2948,11 @@ rt_emit_hit_setup(struct nir_to_msl_ctx *ctx)
    P_IND(ctx, "call->tmin = min_distance;\n");
    P_IND(ctx, "call->object_to_world = object_to_world;\n");
    P_IND(ctx, "call->world_to_object = world_to_object;\n");
+   /* The hit record, as Metal picked it from the intersection function
+    * buffer */
+   P_IND(ctx, "call->record = call->hit_sbt + ulong(call->sbt_offset + "
+              "instance_sbt_offset + geometry_id * call->sbt_stride) * "
+              "call->hit_stride;\n");
 }
 
 /* Any-hit and intersection shaders are reached through the intersection

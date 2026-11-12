@@ -5,6 +5,7 @@
 #include "kk_bo.h"
 #include "kk_cmd_buffer.h"
 #include "kk_device.h"
+#include "kk_rt_stats.h"
 #include "kk_entrypoints.h"
 #include "kk_physical_device.h"
 #include "kk_shader.h"
@@ -13,6 +14,7 @@
 #include "kosmickrisp/compiler/msl_rt.h"
 
 #include "util/hash_table.h"
+#include "util/u_dynarray.h"
 #include "vk_common_entrypoints.h"
 #include "vk_pipeline.h"
 
@@ -20,20 +22,24 @@
  *
  * - Raygen, miss, closest-hit and callable shaders are Metal visible functions
  *   (kk_shader.c, msl_rt.c), any-hit and intersection shaders intersection
- *   functions. One
- *   Metal compute pipeline per VkPipeline links them all, with
- *   kk_rt_dispatch as the kernel, and gets a visible function table holding
- *   them at indices 1 and up (0 means no shader).
+ *   functions. One Metal compute pipeline per VkPipeline links them all, with
+ *   kk_rt_dispatch as the kernel, and a visible function table holding them.
+ * - Each visible function has a device-wide slot, its index in every table
+ *   (0 means no shader), and pipeline-independent binary functions have the
+ *   same function handle ID in every Metal pipeline. A group handle therefore
+ *   depends only on the group's shaders, so a pipeline library and the
+ *   pipelines linking it (VK_KHR_pipeline_library) give the same handles.
  * - The hit shader binding table is Metal's intersection function buffer: a
- *   record starts with the handle of the group's intersection function (its
+ *   record starts with the ID of the group's intersection function (its
  *   any-hit or intersection shader, or a default), which Metal calls on
- *   non-opaque or procedural candidates. Function handles of pipeline-
- *   independent binary functions have the same ID in every pipeline.
- * - Every handle has its shader's table index at MSL_RT_RECORD_FN_OFFSET, which
- *   raygen, traceRay and executeCallable use to call it.
+ *   non-opaque or procedural candidates. Every handle has its shader's slot
+ *   at MSL_RT_RECORD_FN_OFFSET, which raygen, traceRay and executeCallable use
+ *   to call it.
  */
 
 #define KK_RT_MAX_THREADS (16u * 1024u)
+/* Free stacks kept for reuse, about the command buffers in flight */
+#define KK_RT_MAX_FREE_STACKS 8u
 
 /* Callable shaders can nest below the deepest ray */
 #define KK_RT_CALLABLE_DEPTH 2u
@@ -42,17 +48,6 @@ struct kk_rt_link {
    mtl_compute_pipeline_state *pipeline;
    mtl_visible_function_table *vft;
    uint64_t vft_id;
-
-   uint64_t default_triangle_id;
-   uint64_t default_box_id;
-
-   /* Indexed like vk_rt_pipeline::stages */
-   uint32_t stage_count;
-   struct kk_rt_link_stage {
-      const struct vk_shader *shader;
-      uint32_t vft_index;
-      uint64_t intersection_id;
-   } *stages;
 
    /* Bytes of ray tracing stack each thread needs */
    uint32_t stack_size_B;
@@ -63,6 +58,80 @@ kk_device_init_rt(struct kk_device *dev)
 {
    simple_mtx_init(&dev->rt.mutex, mtx_plain);
    dev->rt.links = _mesa_pointer_hash_table_create(NULL);
+   util_dynarray_init(&dev->rt.free_slots, NULL);
+   dev->rt.next_slot = 1;
+
+   simple_mtx_init(&dev->rt_stacks.mutex, mtx_plain);
+   util_dynarray_init(&dev->rt_stacks.free, NULL);
+}
+
+static void
+kk_rt_stack_destroy(struct kk_device *dev, struct kk_bo *bo)
+{
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_STACKS_DESTROYED, 1);
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_STACK_BYTES_DESTROYED, bo->size_B);
+   kk_destroy_bo(dev, bo);
+}
+
+/* Called after the queue is finished, since its command buffers release
+ * stacks */
+void
+kk_device_finish_rt_stacks(struct kk_device *dev)
+{
+   util_dynarray_foreach(&dev->rt_stacks.free, struct kk_bo *, bo)
+      kk_rt_stack_destroy(dev, *bo);
+   util_dynarray_fini(&dev->rt_stacks.free);
+   simple_mtx_destroy(&dev->rt_stacks.mutex);
+}
+
+/* A stack of at least size_B for a command buffer, which gives it back with
+ * kk_rt_stack_release when it's reset, after the GPU is done with it. Stacks
+ * are tens of MiB; making one per command buffer cost a heap allocation,
+ * page clearing and residency set changes every frame. */
+struct kk_bo *
+kk_rt_stack_acquire(struct kk_device *dev, uint64_t size_B)
+{
+   struct kk_bo *found = NULL;
+
+   simple_mtx_lock(&dev->rt_stacks.mutex);
+   util_dynarray_foreach(&dev->rt_stacks.free, struct kk_bo *, bo) {
+      if ((*bo)->size_B >= size_B &&
+          (!found || (*bo)->size_B < found->size_B))
+         found = *bo;
+   }
+   if (found) {
+      util_dynarray_delete_unordered(&dev->rt_stacks.free, struct kk_bo *,
+                                     found);
+   }
+   simple_mtx_unlock(&dev->rt_stacks.mutex);
+
+   if (found)
+      return found;
+
+   /* Round up so launches of slightly different sizes share stacks */
+   struct kk_bo *bo;
+   if (kk_alloc_bo(dev, &dev->vk.base, align64(size_B, 4ull << 20), 256u,
+                   &bo) != VK_SUCCESS)
+      return NULL;
+   kk_bo_set_label(bo, "ray tracing stack");
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_STACKS_CREATED, 1);
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_STACK_BYTES_CREATED, bo->size_B);
+   return bo;
+}
+
+void
+kk_rt_stack_release(struct kk_device *dev, struct kk_bo *bo)
+{
+   simple_mtx_lock(&dev->rt_stacks.mutex);
+   if (util_dynarray_num_elements(&dev->rt_stacks.free, struct kk_bo *) <
+       KK_RT_MAX_FREE_STACKS) {
+      util_dynarray_append(&dev->rt_stacks.free, bo);
+      bo = NULL;
+   }
+   simple_mtx_unlock(&dev->rt_stacks.mutex);
+
+   if (bo)
+      kk_rt_stack_destroy(dev, bo);
 }
 
 static void
@@ -71,10 +140,10 @@ kk_rt_link_destroy(struct kk_device *dev, struct kk_rt_link *link)
    if (link->vft) {
       kk_device_remove_buffer_from_residency_set(dev, link->vft);
       mtl_release(link->vft);
+      KK_RT_STATS_ADD(dev, KK_RT_STAT_VFTS_DESTROYED, 1);
    }
    if (link->pipeline)
       mtl_release(link->pipeline);
-   free(link->stages);
    free(link);
 }
 
@@ -84,6 +153,7 @@ kk_device_finish_rt(struct kk_device *dev)
    hash_table_foreach(dev->rt.links, entry)
       kk_rt_link_destroy(dev, entry->data);
    _mesa_hash_table_destroy(dev->rt.links, NULL);
+   util_dynarray_fini(&dev->rt.free_slots);
 
    if (dev->rt.default_triangle)
       mtl_release(dev->rt.default_triangle);
@@ -94,6 +164,21 @@ kk_device_finish_rt(struct kk_device *dev)
    if (dev->rt.library)
       mtl_release(dev->rt.library);
    simple_mtx_destroy(&dev->rt.mutex);
+}
+
+/* A function's handle ID, the same in every Metal pipeline linking it, read
+ * from a pipeline that links only it. Called with dev->rt.mutex held. */
+static uint64_t
+kk_rt_probe_function_id(struct kk_device *dev, mtl_binary_function *function)
+{
+   mtl_compute_pipeline_state *pipeline =
+      mtl_new_compute_pipeline_state_with_functions(
+         dev->mtl_compiler_handle, dev->rt.kernel, &function, 1, 1);
+   if (!pipeline)
+      return 0;
+   const uint64_t id = mtl_compute_pipeline_function_id(pipeline, function);
+   mtl_release(pipeline);
+   return id;
 }
 
 /* Called with dev->rt.mutex held */
@@ -124,7 +209,49 @@ kk_rt_init_device_objects(struct kk_device *dev)
    if (!dev->rt.kernel || !dev->rt.default_triangle || !dev->rt.default_box)
       return vk_error(dev, VK_ERROR_INITIALIZATION_FAILED);
 
+   dev->rt.default_triangle_id =
+      kk_rt_probe_function_id(dev, dev->rt.default_triangle);
+   dev->rt.default_box_id = kk_rt_probe_function_id(dev, dev->rt.default_box);
+   if (!dev->rt.default_triangle_id || !dev->rt.default_box_id)
+      return vk_error(dev, VK_ERROR_INITIALIZATION_FAILED);
+
    return VK_SUCCESS;
+}
+
+VkResult
+kk_rt_register_shader(struct kk_device *dev, struct kk_shader *shader)
+{
+   simple_mtx_lock(&dev->rt.mutex);
+   VkResult result = kk_rt_init_device_objects(dev);
+
+   if (result == VK_SUCCESS && shader->pipeline.rt.function) {
+      shader->pipeline.rt.slot =
+         util_dynarray_num_elements(&dev->rt.free_slots, uint32_t)
+            ? util_dynarray_pop(&dev->rt.free_slots, uint32_t)
+            : dev->rt.next_slot++;
+   }
+
+   if (result == VK_SUCCESS && shader->pipeline.rt.intersection) {
+      shader->pipeline.rt.intersection_id =
+         kk_rt_probe_function_id(dev, shader->pipeline.rt.intersection);
+      if (!shader->pipeline.rt.intersection_id)
+         result = vk_error(dev, VK_ERROR_INVALID_SHADER_NV);
+   }
+
+   simple_mtx_unlock(&dev->rt.mutex);
+   return result;
+}
+
+void
+kk_rt_unregister_shader(struct kk_device *dev, struct kk_shader *shader)
+{
+   if (!shader->pipeline.rt.slot)
+      return;
+
+   simple_mtx_lock(&dev->rt.mutex);
+   util_dynarray_append(&dev->rt.free_slots, shader->pipeline.rt.slot);
+   simple_mtx_unlock(&dev->rt.mutex);
+   shader->pipeline.rt.slot = 0;
 }
 
 static struct kk_shader *
@@ -144,26 +271,20 @@ kk_rt_link_pipeline(struct kk_device *dev, struct vk_rt_pipeline *pipeline,
       return result;
 
    struct kk_rt_link *link = calloc(1, sizeof(*link));
-   if (!link)
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-   link->stage_count = pipeline->stage_count;
-   link->stages = calloc(MAX2(pipeline->stage_count, 1),
-                         sizeof(*link->stages));
-
    /* At most two functions per stage, plus the two defaults */
-   const uint32_t max_functions = 2 + 2 * pipeline->stage_count;
    mtl_binary_function **functions =
-      malloc(max_functions * sizeof(*functions));
-   if (!link->stages || !functions) {
+      malloc((2 + 2 * pipeline->stage_count) * sizeof(*functions));
+   if (!link || !functions) {
+      free(link);
       free(functions);
-      kk_rt_link_destroy(dev, link);
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
+   /* Library stages are in pipeline->stages too */
    uint32_t function_count = 0;
    functions[function_count++] = dev->rt.default_triangle;
    functions[function_count++] = dev->rt.default_box;
-   uint32_t max_out_B = 0;
+   uint32_t max_out_B = 0, max_slot = 0;
    for (uint32_t i = 0; i < pipeline->stage_count; i++) {
       struct kk_shader *shader = kk_rt_stage_shader(&pipeline->stages[i]);
       if (shader->pipeline.rt.function)
@@ -171,6 +292,7 @@ kk_rt_link_pipeline(struct kk_device *dev, struct vk_rt_pipeline *pipeline,
       if (shader->pipeline.rt.intersection)
          functions[function_count++] = shader->pipeline.rt.intersection;
       max_out_B = MAX2(max_out_B, shader->info.rt.out_size_B);
+      max_slot = MAX2(max_slot, shader->pipeline.rt.slot);
    }
 
    /* Each recursion level (raygen, traced rays, callables) has a frame and
@@ -187,31 +309,21 @@ kk_rt_link_pipeline(struct kk_device *dev, struct vk_rt_pipeline *pipeline,
       return vk_error(dev, VK_ERROR_INVALID_SHADER_NV);
    }
 
-   link->vft = mtl_new_visible_function_table(link->pipeline,
-                                              pipeline->stage_count + 1);
+   link->vft = mtl_new_visible_function_table(link->pipeline, max_slot + 1);
    if (!link->vft) {
       kk_rt_link_destroy(dev, link);
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
    kk_device_add_buffer_to_residency_set(dev, link->vft);
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_VFTS_CREATED, 1);
    link->vft_id = mtl_visible_function_table_resource_id(link->vft);
-
-   link->default_triangle_id =
-      mtl_compute_pipeline_function_id(link->pipeline, dev->rt.default_triangle);
-   link->default_box_id =
-      mtl_compute_pipeline_function_id(link->pipeline, dev->rt.default_box);
 
    for (uint32_t i = 0; i < pipeline->stage_count; i++) {
       struct kk_shader *shader = kk_rt_stage_shader(&pipeline->stages[i]);
-      link->stages[i].shader = &shader->vk;
-      if (shader->pipeline.rt.function) {
-         link->stages[i].vft_index = i + 1;
-         mtl_visible_function_table_set(link->vft, link->pipeline, i + 1,
+      if (shader->pipeline.rt.function)
+         mtl_visible_function_table_set(link->vft, link->pipeline,
+                                        shader->pipeline.rt.slot,
                                         shader->pipeline.rt.function);
-      }
-      if (shader->pipeline.rt.intersection)
-         link->stages[i].intersection_id = mtl_compute_pipeline_function_id(
-            link->pipeline, shader->pipeline.rt.intersection);
    }
 
    simple_mtx_lock(&dev->rt.mutex);
@@ -242,10 +354,16 @@ kk_CreateRayTracingPipelinesKHR(
       _device, deferredOperation, pipelineCache, createInfoCount, pCreateInfos,
       pAllocator, pPipelines);
 
+   /* Libraries are only linked into the pipelines using them */
    for (uint32_t i = 0; i < createInfoCount; i++) {
       VK_FROM_HANDLE(vk_pipeline, pipeline, pPipelines[i]);
-      if (!pipeline || (pipeline->flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR))
+      if (!pipeline)
          continue;
+      if (pipeline->flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR) {
+         if (unlikely(dev->rt_stats))
+            kk_rt_stats_add(dev, KK_RT_STAT_LIBRARIES, 1);
+         continue;
+      }
 
       VkResult link_result = kk_rt_link_pipeline(
          dev, container_of(pipeline, struct vk_rt_pipeline, base),
@@ -255,6 +373,8 @@ kk_CreateRayTracingPipelinesKHR(
          pPipelines[i] = VK_NULL_HANDLE;
          if (result == VK_SUCCESS)
             result = link_result;
+      } else if (unlikely(dev->rt_stats)) {
+         kk_rt_stats_add(dev, KK_RT_STAT_PIPELINES, 1);
       }
    }
 
@@ -296,17 +416,8 @@ kk_CmdBindPipeline(VkCommandBuffer commandBuffer,
    vk_common_CmdBindPipeline(commandBuffer, pipelineBindPoint, _pipeline);
 }
 
-static const struct kk_rt_link_stage *
-kk_rt_link_find_stage(const struct kk_rt_link *link,
-                      const struct vk_shader *shader)
-{
-   for (uint32_t i = 0; i < link->stage_count; i++) {
-      if (link->stages[i].shader == shader)
-         return &link->stages[i];
-   }
-   return NULL;
-}
-
+/* Libraries and the pipelines linking them get the same handles, since they
+ * only depend on the group's shaders. */
 VKAPI_ATTR VkResult VKAPI_CALL
 kk_GetRayTracingShaderGroupHandlesKHR(VkDevice _device, VkPipeline _pipeline,
                                       uint32_t firstGroup, uint32_t groupCount,
@@ -314,58 +425,63 @@ kk_GetRayTracingShaderGroupHandlesKHR(VkDevice _device, VkPipeline _pipeline,
 {
    VK_FROM_HANDLE(kk_device, dev, _device);
    VK_FROM_HANDLE(vk_pipeline, pipeline, _pipeline);
+
+   /* Invalid usage, but games do it after a failed pipeline creation (DOOM
+    * Eternal queries a null pipeline); fail instead of crashing. */
+   if (!pipeline ||
+       pipeline->bind_point != VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+      mesa_logw_once("KosmicKrisp: vkGetRayTracingShaderGroupHandlesKHR with "
+                     "no ray tracing pipeline");
+      return vk_error(dev, VK_ERROR_UNKNOWN);
+   }
+
    struct vk_rt_pipeline *rt_pipeline =
       container_of(pipeline, struct vk_rt_pipeline, base);
-
-   /* Libraries have no link; their handles only matter once linked into a
-    * pipeline, which has its own. */
-   const struct kk_rt_link *link = kk_rt_get_link(dev, pipeline);
+   if ((uint64_t)firstGroup + groupCount > rt_pipeline->group_count ||
+       dataSize < (size_t)groupCount * MSL_RT_HANDLE_SIZE)
+      return vk_error(dev, VK_ERROR_UNKNOWN);
 
    for (uint32_t g = 0; g < groupCount; g++) {
       const struct vk_rt_shader_group *group =
          &rt_pipeline->groups[firstGroup + g];
       uint8_t *handle = (uint8_t *)pData + g * MSL_RT_HANDLE_SIZE;
       memset(handle, 0, MSL_RT_HANDLE_SIZE);
-      if (!link)
-         continue;
 
       uint64_t intersection_id = 0;
-      uint32_t vft_index = 0;
+      uint32_t slot = 0;
       switch (group->type) {
       case VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR:
-         intersection_id = link->default_triangle_id;
+         intersection_id = dev->rt.default_triangle_id;
          break;
       case VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR:
-         intersection_id = link->default_box_id;
+         intersection_id = dev->rt.default_box_id;
          break;
       default:
          break;
       }
 
       for (uint32_t s = 0; s < group->stage_count; s++) {
-         const struct kk_rt_link_stage *stage =
-            kk_rt_link_find_stage(link, group->stages[s].shader);
-         if (!stage)
-            continue;
+         const struct kk_shader *shader =
+            kk_rt_stage_shader(&group->stages[s]);
 
          switch (group->stages[s].stage) {
          case MESA_SHADER_ANY_HIT:
             /* TODO_KOSMICKRISP: any-hit isn't run for procedural groups */
             if (group->type ==
                 VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR)
-               intersection_id = stage->intersection_id;
+               intersection_id = shader->pipeline.rt.intersection_id;
             break;
          case MESA_SHADER_INTERSECTION:
-            intersection_id = stage->intersection_id;
+            intersection_id = shader->pipeline.rt.intersection_id;
             break;
          default:
-            vft_index = stage->vft_index;
+            slot = shader->pipeline.rt.slot;
             break;
          }
       }
 
       memcpy(handle, &intersection_id, sizeof(intersection_id));
-      memcpy(handle + MSL_RT_RECORD_FN_OFFSET, &vft_index, sizeof(vft_index));
+      memcpy(handle + MSL_RT_RECORD_FN_OFFSET, &slot, sizeof(slot));
    }
 
    return VK_SUCCESS;
@@ -397,10 +513,14 @@ kk_cmd_trace_rays(struct kk_cmd_buffer *cmd,
    struct kk_rt_state *rt = &cmd->state.rt;
    const uint64_t stack_B = (uint64_t)threads * link->stack_size_B;
    if (rt->stack_size_B < stack_B) {
-      rt->stack = kk_pool_alloc(cmd, stack_B, 256u);
-      rt->stack_size_B = rt->stack.gpu ? stack_B : 0;
-      if (!rt->stack.gpu)
+      struct kk_bo *bo = kk_rt_stack_acquire(dev, stack_B);
+      if (!bo) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return;
+      }
+      util_dynarray_append(&cmd->rt_stacks, bo);
+      rt->stack = (struct kk_ptr){.gpu = bo->gpu, .cpu = bo->cpu};
+      rt->stack_size_B = bo->size_B;
    }
 
    struct kk_descriptor_state *desc = &rt->descriptors;
@@ -434,17 +554,33 @@ kk_cmd_trace_rays(struct kk_cmd_buffer *cmd,
       .vft_id = link->vft_id,
    };
 
+   const bool stats = dev->rt_stats != NULL;
+   int32_t stats_pair = -1;
+   if (unlikely(stats)) {
+      if (indirect_addr) {
+         cmd->rt_stats.counts[KK_RT_STAT_TRACES_INDIRECT]++;
+      } else {
+         cmd->rt_stats.counts[KK_RT_STAT_TRACES]++;
+         cmd->rt_stats.counts[KK_RT_STAT_RAYS] += launch;
+      }
+      stats_pair = kk_rt_stats_gpu_begin(cmd, KK_RT_STATS_GPU_TRACE);
+   }
+
    mtl_compute_encoder *encoder = cs_get_compute(cmd);
    /* Traces in a command buffer share the stack */
    mtl_barrier_after_encoder_stages(
       encoder, MTL_STAGE_DISPATCH | MTL_STAGE_ACCELERATION_STRUCTURE,
       MTL_STAGE_DISPATCH);
+
    mtl_compute_set_pipeline_state(encoder, link->pipeline);
    mtl_set_address(cmd->argument_table, args_ptr.gpu, 0u);
    mtl_dispatch_threads(encoder, (struct mtl_size){threads, 1, 1},
                         (struct mtl_size){64, 1, 1});
    mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
                                     MTL_STAGE_DISPATCH);
+
+   if (unlikely(stats))
+      kk_rt_stats_gpu_end(cmd, stats_pair);
 
    /* Restore the compute root */
    mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);

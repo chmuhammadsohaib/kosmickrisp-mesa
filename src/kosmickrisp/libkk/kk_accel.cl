@@ -74,3 +74,12 @@ libkk_convert_instances(global struct mtl_instance *dst, uint64_t src_addr,
 
    dst[id] = out;
 }
+
+/* Rounds a compacted size Metal wrote up to the placement alignment, so
+ * compacted structures packed at their reported sizes stay placeable (see
+ * kk_acceleration_structure.c) */
+KERNEL(1)
+libkk_align_u64(global uint64_t *address, uint64_t alignment)
+{
+   *address = (*address + alignment - 1) & ~(alignment - 1);
+}

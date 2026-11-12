@@ -76,7 +76,7 @@ struct kk_physical_device {
    uint8_t mem_type_count;
    /* Private memory backing sparse resources, which only they may use; see
     * kk_sparse.c. mem_type_count when there is none. */
-   uint8_t sparse_mem_type;
+   uint8_t private_mem_type;
 
    // Emulated binary sync type
    struct vk_sync_binary_type sync_binary_type;
@@ -102,12 +102,13 @@ kk_physical_device_instance(struct kk_physical_device *pdev)
    return (struct kk_instance *)pdev->vk.instance;
 }
 
-/* Memory types for everything but sparse resources */
+/* Memory types for everything but sparse resources and acceleration structure
+ * storage (which can also use the private type) */
 static inline uint32_t
 kk_regular_mem_types(const struct kk_physical_device *pdev)
 {
    return BITFIELD_MASK(pdev->mem_type_count) &
-          ~BITFIELD_BIT(pdev->sparse_mem_type);
+          ~BITFIELD_BIT(pdev->private_mem_type);
 }
 
 bool kk_extension_only_reported(const struct kk_physical_device *pdev,

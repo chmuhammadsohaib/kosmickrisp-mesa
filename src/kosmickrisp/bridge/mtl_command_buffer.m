@@ -61,6 +61,16 @@ mtl_command_resolve_counter_heap(mtl_command_buffer *command_buffer,
 }
 
 void
+mtl_command_buffer_write_timestamp(mtl_command_buffer *command_buffer,
+                                   mtl_counter_heap *heap, uint32_t index)
+{
+   @autoreleasepool {
+      id<MTL4CommandBuffer> cmd_buf = (id<MTL4CommandBuffer>)command_buffer;
+      [cmd_buf writeTimestampIntoHeap:(id<MTL4CounterHeap>)heap atIndex:index];
+   }
+}
+
+void
 mtl_command_buffer_set_label(mtl_command_buffer *command_buffer,
                              const char *label)
 {

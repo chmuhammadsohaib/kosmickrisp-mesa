@@ -12,7 +12,10 @@
 #include "kk_entrypoints.h"
 #include "kk_image.h"
 #include "kk_instance.h"
+#include "kk_queue.h"
+#include "kk_rt_stats.h"
 #include "wsi_common.h"
+#include "wsi_common_entrypoints.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
@@ -142,4 +145,18 @@ kk_finish_wsi(struct kk_physical_device *pdev)
 {
    pdev->vk.wsi_device = NULL;
    wsi_device_finish(&pdev->wsi_device, &pdev->vk.instance->alloc);
+}
+
+/* Counts frames for KK_RT_STATS */
+VKAPI_ATTR VkResult VKAPI_CALL
+kk_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
+{
+   VK_FROM_HANDLE(vk_queue, vk_queue, _queue);
+   struct kk_device *dev =
+      kk_queue_device(container_of(vk_queue, struct kk_queue, vk));
+
+   if (unlikely(dev->rt_stats))
+      kk_rt_stats_add(dev, KK_RT_STAT_FRAMES, 1);
+
+   return wsi_QueuePresentKHR(_queue, pPresentInfo);
 }

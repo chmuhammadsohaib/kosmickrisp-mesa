@@ -385,6 +385,8 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_acceleration_structure = pdev->settings.ray_tracing_enabled,
       .KHR_ray_query = pdev->settings.ray_tracing_enabled,
       .KHR_ray_tracing_pipeline = pdev->settings.ray_tracing_enabled,
+      .KHR_pipeline_library = pdev->settings.ray_tracing_enabled,
+      .EXT_pipeline_library_group_handles = pdev->settings.ray_tracing_enabled,
    };
 }
 
@@ -503,6 +505,11 @@ kk_get_device_features(
 
       /* VK_KHR_ray_query */
       .rayQuery = supported_extensions->KHR_ray_query,
+
+      /* VK_EXT_pipeline_library_group_handles: group handles only depend on
+       * their shaders (kk_rt_pipeline.c) */
+      .pipelineLibraryGroupHandles =
+         supported_extensions->EXT_pipeline_library_group_handles,
 
       /* VK_KHR_ray_tracing_pipeline */
       .rayTracingPipeline = supported_extensions->KHR_ray_tracing_pipeline,
@@ -1425,6 +1432,23 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
       .used = kk_get_sysmem_heap_used,
    };
 
+   /* Private memory, which isn't host visible: Metal places sparse resources
+    * and acceleration structures only in private heaps. Only sparse resources
+    * and acceleration structure storage buffers list this type. It comes
+    * first, as the spec orders types whose flags are a subset of another's,
+    * which also makes it the one allocators looking for the first
+    * DEVICE_LOCAL type pick. Without either feature it doesn't exist and
+    * private_mem_type is an index past the last type. */
+   const bool private_mem =
+      pdev->settings.sparse_enabled || pdev->settings.ray_tracing_enabled;
+   if (private_mem) {
+      pdev->private_mem_type = pdev->mem_type_count;
+      pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
+         .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+         .heapIndex = sysmem_heap_idx,
+      };
+   }
+
    pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
       .propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
@@ -1432,16 +1456,8 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
       .heapIndex = sysmem_heap_idx,
    };
-
-   /* Metal's placement sparse resources need private memory, which isn't host
-    * visible. Only sparse resources list this type. */
-   pdev->sparse_mem_type = pdev->mem_type_count;
-   if (pdev->settings.sparse_enabled) {
-      pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
-         .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-         .heapIndex = sysmem_heap_idx,
-      };
-   }
+   if (!private_mem)
+      pdev->private_mem_type = pdev->mem_type_count;
 
    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));

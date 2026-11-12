@@ -91,6 +91,14 @@ void mtl_acceleration_structure_get_sizes(
 
 mtl_acceleration_structure *
 mtl_new_acceleration_structure(mtl_device *device, uint64_t size_B);
+/* In a private placement heap, at a multiple of MTL_AS_PLACEMENT_ALIGN_B */
+mtl_acceleration_structure *
+mtl_heap_new_acceleration_structure(mtl_heap *heap, uint64_t size_B,
+                                    uint64_t offset_B);
+
+/* Metal's heapAccelerationStructureSizeAndAlignWithSize alignment, the same
+ * for every size (experiments/asAlign) */
+#define MTL_AS_PLACEMENT_ALIGN_B (16u * 1024u)
 
 uint64_t
 mtl_acceleration_structure_get_resource_id(mtl_acceleration_structure *as);

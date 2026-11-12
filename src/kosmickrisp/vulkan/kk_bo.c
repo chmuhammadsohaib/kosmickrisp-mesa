@@ -8,6 +8,7 @@
 
 #include "kk_device.h"
 #include "kk_physical_device.h"
+#include "kk_rt_stats.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
@@ -66,6 +67,7 @@ kk_alloc_bo(struct kk_device *dev, struct vk_object_base *log_obj,
    bo->cpu = mtl_get_contents(map);
 
    kk_device_add_heap_to_residency_set(dev, handle);
+   KK_RT_STATS_ADD_BO(dev, bo, true);
 
    *bo_out = bo;
    return result;
@@ -79,7 +81,7 @@ fail_heap:
 }
 
 VkResult
-kk_alloc_sparse_bo(struct kk_device *dev, struct vk_object_base *log_obj,
+kk_alloc_private_bo(struct kk_device *dev, struct vk_object_base *log_obj,
                    uint64_t size_B, struct kk_bo **bo_out)
 {
    size_B = align64(size_B, MTL_SPARSE_PAGE_SIZE_B);
@@ -95,7 +97,9 @@ kk_alloc_sparse_bo(struct kk_device *dev, struct vk_object_base *log_obj,
 
    bo->mtl_handle = handle;
    bo->size_B = size_B;
+   bo->private_heap = true;
    kk_device_add_heap_to_residency_set(dev, handle);
+   KK_RT_STATS_ADD_BO(dev, bo, true);
 
    *bo_out = bo;
    return VK_SUCCESS;
@@ -104,6 +108,8 @@ kk_alloc_sparse_bo(struct kk_device *dev, struct vk_object_base *log_obj,
 void
 kk_destroy_bo(struct kk_device *dev, struct kk_bo *bo)
 {
+   KK_RT_STATS_ADD_BO(dev, bo, false);
+
    /* We may only have a mapped buffer, for example if the memory was imported
     * from a host pointer */
    if (bo->mtl_handle)

@@ -106,6 +106,8 @@ kk_files = files(
   'kk_query_table.h',
   'kk_query_table.c',
   'kk_rt_pipeline.c',
+  'kk_rt_stats.c',
+  'kk_rt_stats.h',
   'kk_queue.h',
   'kk_queue.c',
   'kk_sampler.h',

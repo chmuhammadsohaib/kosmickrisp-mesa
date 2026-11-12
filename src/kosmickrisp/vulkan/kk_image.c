@@ -680,7 +680,7 @@ kk_get_image_memory_requirements(struct kk_device *dev, struct kk_image *image,
       pMemoryRequirements->memoryRequirements = (VkMemoryRequirements){
          .size = kk_image_sparse_size_B(image),
          .alignment = MTL_SPARSE_PAGE_SIZE_B,
-         .memoryTypeBits = BITFIELD_BIT(pdev->sparse_mem_type),
+         .memoryTypeBits = BITFIELD_BIT(pdev->private_mem_type),
       };
       return;
    }

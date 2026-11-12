@@ -27,6 +27,10 @@ struct kk_buffer {
 
    /* A Metal placement sparse buffer, bound with vkQueueBindSparse */
    bool sparse;
+
+   /* The memory it's bound to, where acceleration structures get placed */
+   struct kk_bo *bo;
+   uint64_t bo_offset;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_buffer, vk.base, VkBuffer,

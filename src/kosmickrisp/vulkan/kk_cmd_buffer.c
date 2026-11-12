@@ -54,12 +54,17 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
       kk_destroy_bo(dev, *bo);
    }
    util_dynarray_clear(&cmd->large_bos);
+   util_dynarray_foreach(&cmd->rt_stacks, struct kk_bo *, bo)
+      kk_rt_stack_release(dev, *bo);
+   util_dynarray_clear(&cmd->rt_stacks);
    util_dynarray_clear(&cmd->post_render_writes);
    util_dynarray_clear(&cmd->ts_resolves);
    util_dynarray_clear(&cmd->ts_stage_map);
 }
 
-/* Ends Metal command buffer recording and returns allocator to pool for reuse */
+/* Ends Metal command buffer recording. The allocator holds the encoded
+ * commands until the GPU has run them, so it stays with the command buffer
+ * until release_allocator. */
 static void
 end_recording(struct kk_cmd_buffer *cmd)
 {
@@ -68,6 +73,18 @@ end_recording(struct kk_cmd_buffer *cmd)
 
    cs_end(cmd);
    mtl_end_command_buffer(cmd->metal.cmd_buf);
+}
+
+/* Frees the allocator's memory and returns it to the pool for reuse. Only
+ * when the command buffer is reset or destroyed, so no longer pending:
+ * allocators never reset kept every command ever encoded allocated. */
+static void
+release_allocator(struct kk_cmd_buffer *cmd)
+{
+   if (!cmd->metal.allocator)
+      return;
+
+   mtl_command_allocator_reset(cmd->metal.allocator);
    kk_cmd_pool_return_allocator(kk_cmd_buffer_pool(cmd), cmd->metal.allocator);
    cmd->metal.allocator = NULL;
 }
@@ -84,6 +101,7 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
 
    /* Ensure closed command buffer for safe returns to pool */
    end_recording(cmd);
+   release_allocator(cmd);
    if (cmd->metal.cmd_buf)
       kk_cmd_pool_return_cmd_buf(pool, cmd->metal.cmd_buf);
    cmd->metal.cmd_buf = NULL;
@@ -95,6 +113,7 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
 
    kk_cmd_release_resources(dev, cmd);
    util_dynarray_fini(&cmd->large_bos);
+   util_dynarray_fini(&cmd->rt_stacks);
    util_dynarray_fini(&cmd->post_render_writes);
    util_dynarray_fini(&cmd->ts_resolves);
    util_dynarray_fini(&cmd->ts_stage_map);
@@ -128,6 +147,7 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
       goto alloc_fail;
 
    cmd->ts_resolves = UTIL_DYNARRAY_INIT;
+   cmd->rt_stacks = UTIL_DYNARRAY_INIT;
    cmd->ts_stage_map = UTIL_DYNARRAY_INIT;
    cmd->post_render_writes = UTIL_DYNARRAY_INIT;
 
@@ -164,6 +184,7 @@ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
 
    /* Ensure closed command buffer so we can start it again */
    end_recording(cmd);
+   release_allocator(cmd);
    kk_cmd_release_resources(dev, cmd);
 
    cmd->uploader.bo = NULL;
@@ -213,6 +234,8 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    }
 
    vk_command_buffer_begin(&cmd->vk, pBeginInfo);
+   if (unlikely(kk_cmd_buffer_device(cmd)->rt_stats))
+      memset(&cmd->rt_stats, 0, sizeof(cmd->rt_stats));
    cmd->one_time_submit =
       pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 

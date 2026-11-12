@@ -10,6 +10,7 @@
 #include "kk_device.h"
 #include "kk_entrypoints.h"
 #include "kk_physical_device.h"
+#include "kk_rt_stats.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
@@ -138,9 +139,10 @@ kk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
 
       mem->bo->gpu = mtl_buffer_get_gpu_address(mem->bo->map);
       mem->bo->cpu = mtl_get_contents(mem->bo->map);
+      KK_RT_STATS_ADD_BO(dev, mem->bo, true);
    } else if (pAllocateInfo->memoryTypeIndex ==
-              kk_device_physical(dev)->sparse_mem_type) {
-      result = kk_alloc_sparse_bo(dev, &dev->vk.base, aligned_size, &mem->bo);
+              kk_device_physical(dev)->private_mem_type) {
+      result = kk_alloc_private_bo(dev, &dev->vk.base, aligned_size, &mem->bo);
       if (result != VK_SUCCESS)
          goto fail_alloc;
    } else {

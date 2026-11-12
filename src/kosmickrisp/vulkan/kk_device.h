@@ -110,6 +110,16 @@ struct kk_device {
       uint32_t count;
    } as_slots;
 
+   /* Private heaps for acceleration structures that can't be placed in their
+    * buffer's memory, and the update policy (KK_RT_REFIT_LIMIT,
+    * KK_RT_REFIT_MIN_PRIMS). See kk_acceleration_structure.c */
+   struct {
+      simple_mtx_t mutex;
+      struct util_dynarray chunks; /* struct kk_as_chunk * */
+      int64_t refit_limit;
+      int64_t refit_min_prims;
+   } as_pool;
+
    /* Ray tracing pipelines: the dispatch kernel and default hit group
     * functions, built on first use, and each pipeline's Metal linking. See
     * kk_rt_pipeline.c */
@@ -119,8 +129,22 @@ struct kk_device {
       mtl_function_descriptor *kernel;
       mtl_binary_function *default_triangle;
       mtl_binary_function *default_box;
+      uint64_t default_triangle_id;
+      uint64_t default_box_id;
       struct hash_table *links; /* struct vk_pipeline * -> kk_rt_link */
+      /* Visible function table slots of ray tracing shaders */
+      struct util_dynarray free_slots;
+      uint32_t next_slot;
    } rt;
+
+   /* Ray tracing stacks not used by a command buffer; see kk_rt_stack_acquire */
+   struct {
+      simple_mtx_t mutex;
+      struct util_dynarray free; /* struct kk_bo * */
+   } rt_stacks;
+
+   /* KK_RT_STATS, NULL when off; see kk_rt_stats.c */
+   struct kk_rt_stats *rt_stats;
 
    /* Sparse memory, for unmapping pages; see kk_sparse.c */
    struct kk_bo *sparse_unmap_bo;
@@ -150,13 +174,13 @@ void kk_device_add_buffer_to_residency_set(struct kk_device *dev,
 void kk_device_remove_buffer_from_residency_set(struct kk_device *dev,
                                                 mtl_buffer *buffer);
 void kk_device_make_resources_resident(struct kk_device *dev);
-void kk_device_add_acceleration_structure_to_residency_set(
-   struct kk_device *dev, mtl_acceleration_structure *as);
-void kk_device_remove_acceleration_structure_from_residency_set(
-   struct kk_device *dev, mtl_acceleration_structure *as);
 
 void kk_device_init_rt(struct kk_device *dev);
 void kk_device_finish_rt(struct kk_device *dev);
+void kk_device_finish_rt_stacks(struct kk_device *dev);
+/* Ray tracing stacks, reused across command buffers */
+struct kk_bo *kk_rt_stack_acquire(struct kk_device *dev, uint64_t size_B);
+void kk_rt_stack_release(struct kk_device *dev, struct kk_bo *bo);
 
 void kk_device_init_as_slots(struct kk_device *dev);
 void kk_device_finish_as_slots(struct kk_device *dev);

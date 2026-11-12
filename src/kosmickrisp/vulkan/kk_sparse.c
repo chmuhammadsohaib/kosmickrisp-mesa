@@ -21,7 +21,7 @@
 
 /* Sparse resources are Metal placement sparse buffers and textures. They map
  * 16 KiB pages of private placement heaps, the memory of the sparse memory
- * type (kk_alloc_sparse_bo), with MTL4CommandQueue mapping updates, which
+ * type (kk_alloc_private_bo), with MTL4CommandQueue mapping updates, which
  * vkQueueBindSparse issues in order with the queue's other work.
  *
  * A sparse image's opaque address space, used by opaque binds and its memory

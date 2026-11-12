@@ -938,6 +938,7 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
       mtl_release(pipe->cs);
       pipe->cs = NULL;
    } else if (mesa_shader_stage_is_rt(shader->info.stage)) {
+      kk_rt_unregister_shader(dev, shader);
       if (pipe->rt.function)
          mtl_release(pipe->rt.function);
       if (pipe->rt.intersection)
@@ -1165,6 +1166,8 @@ kk_compile_rt_functions(struct kk_device *dev, struct kk_shader *shader)
    }
 
    mtl_release(library);
+   if (result == VK_SUCCESS)
+      result = kk_rt_register_shader(dev, shader);
    return result;
 }
 

@@ -34,3 +34,9 @@ mtl_command_buffer_set_label(mtl_command_buffer *command_buffer,
                              const char *label)
 {
 }
+
+void
+mtl_command_buffer_write_timestamp(mtl_command_buffer *command_buffer,
+                                   mtl_counter_heap *heap, uint32_t index)
+{
+}

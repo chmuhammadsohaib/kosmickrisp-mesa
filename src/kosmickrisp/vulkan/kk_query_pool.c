@@ -649,6 +649,19 @@ kk_CmdWriteAccelerationStructuresPropertiesKHR(
    mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_ACCELERATION_STRUCTURE,
                                     MTL_STAGE_DISPATCH);
 
+   /* Compacted sizes become multiples of the placement alignment, like the
+    * sizes vkGetAccelerationStructureBuildSizesKHR reports, so compacted
+    * structures packed at their sizes are placed in their buffer's memory */
+   if (queryType == VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR) {
+      for (uint32_t i = 0; i < accelerationStructureCount; i++) {
+         libkk_align_u64(cmd, kk_grid_1d(1), false,
+                         kk_query_report_addr(dev, pool, firstQuery + i),
+                         MTL_AS_PLACEMENT_ALIGN_B);
+      }
+      mtl_barrier_after_encoder_stages(cs_get_compute(cmd), MTL_STAGE_DISPATCH,
+                                       MTL_STAGE_DISPATCH);
+   }
+
    for (uint32_t i = 0; i < accelerationStructureCount; i++) {
       kk_cmd_write(cmd, (struct libkk_imm_write){
                            kk_query_available_addr(pool, firstQuery + i), true});

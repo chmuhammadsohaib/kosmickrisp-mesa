@@ -16,11 +16,21 @@
 /* Metal needs no alignment beyond this for scratch and instance data */
 #define KK_AS_SCRATCH_ALIGNMENT 256u
 
+struct kk_as_chunk;
+
 struct kk_acceleration_structure {
    struct vk_acceleration_structure vk;
 
    mtl_acceleration_structure *mtl_handle;
    uint64_t resource_id;
+
+   /* Placed in its buffer's memory, or else suballocated from chunk */
+   bool placed;
+   struct kk_as_chunk *chunk;
+   uint64_t chunk_offset;
+
+   /* Refits since the last build, counted as commands are recorded */
+   uint32_t refits;
 
    /* The structure's device address is the GPU address of an 8-byte slot
     * holding resource_id, so shaders and instances get a handle with one load.
@@ -41,6 +51,10 @@ kk_acceleration_structure_resource_id(VkAccelerationStructureKHR handle)
 }
 
 bool kk_acceleration_structure_vertex_format_supported(VkFormat format);
+
+struct kk_device;
+void kk_device_init_as_pool(struct kk_device *dev);
+void kk_device_finish_as_pool(struct kk_device *dev);
 
 uint64_t kk_acceleration_structure_serialized_size(
    const struct kk_acceleration_structure *as);
