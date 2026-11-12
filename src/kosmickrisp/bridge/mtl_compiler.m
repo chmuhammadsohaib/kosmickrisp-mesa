@@ -47,6 +47,10 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
       MTLCompileOptions *opts = [[MTLCompileOptions new] autorelease];
       opts.languageVersion = (MTLLanguageVersion)msl_version;
       opts.mathMode = (MTLMathMode)math_mode;
+      /* kosmickrisp-invariant-position: Metal only keeps [[invariant]] positions consistent
+       * across pipelines when the library is compiled with preserveInvariance. */
+      if ([ns_src containsString:@"[[position, invariant]]"])
+         opts.preserveInvariance = YES;
       opts.mathFloatingPointFunctions = (MTLMathFloatingPointFunctions)math_fp_fns;
 
       MTL4LibraryDescriptor *desc = [[MTL4LibraryDescriptor new] autorelease];

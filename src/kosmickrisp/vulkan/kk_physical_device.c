@@ -29,6 +29,47 @@
 #include "vk_drm_syncobj.h"
 #include "vk_shader_module.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* kosmickrisp-compat-switches: KK_VENDOR_ID sets the GPU identity the game sees. apple (default)
+ * is the real one; nvidia and amd are presets with a matching name and a driver version in that
+ * vendor's own format, so driver-version checks parse sensibly; or raw hex
+ * "vendor[:device[:driverVersion]]". Capabilities don't change. */
+static void
+kk_apply_vendor_identity(struct vk_properties *properties)
+{
+   const char *value = getenv("KK_VENDOR_ID");
+   if (!value || !value[0] || strcmp(value, "apple") == 0)
+      return;
+   if (strcmp(value, "nvidia") == 0) {
+      properties->vendorID = 0x10de;
+      properties->deviceID = 0x2786;          /* GeForce RTX 4070 */
+      properties->driverVersion = 0x8C178000; /* 560.94 in NVIDIA's version packing */
+      snprintf(properties->deviceName, sizeof(properties->deviceName), "NVIDIA GeForce RTX 4070");
+      return;
+   }
+   if (strcmp(value, "amd") == 0) {
+      properties->vendorID = 0x1002;
+      properties->deviceID = 0x73bf;          /* Radeon RX 6800 XT */
+      properties->driverVersion = VK_MAKE_API_VERSION(0, 2, 0, 302);
+      snprintf(properties->deviceName, sizeof(properties->deviceName), "AMD Radeon RX 6800 XT");
+      return;
+   }
+   unsigned vendor = 0, device = 0, version = 0;
+   int count = sscanf(value, "%x:%x:%x", &vendor, &device, &version);
+   if (count >= 1 && vendor)
+      properties->vendorID = vendor;
+   if (count >= 2)
+      properties->deviceID = device;
+   if (count >= 3)
+      properties->driverVersion = version;
+}
+
 static uint32_t
 kk_get_vk_version()
 {
@@ -672,7 +713,8 @@ kk_get_device_properties(
       /* Vulkan 1.1 properties */
       .subgroupSize = 32,
       .subgroupSupportedStages =
-         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+         VK_SHADER_STAGE_VERTEX_BIT, /* kosmickrisp-vertex-subgroups */
       .subgroupSupportedOperations =
          VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
          VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
@@ -960,6 +1002,7 @@ kk_get_device_properties(
    snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "KosmicKrisp");
    snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,
             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+   kk_apply_vendor_identity(properties);
 }
 
 static void

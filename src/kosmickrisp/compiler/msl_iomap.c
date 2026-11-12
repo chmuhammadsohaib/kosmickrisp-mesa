@@ -131,6 +131,12 @@ varying_slot_semantic(struct nir_to_msl_ctx *ctx, unsigned location,
    } else {
       P(ctx, "[[");
       varying_slot_name(ctx, location, component);
+      /* kosmickrisp-invariant-position: mark vertex positions invariant, so every pipeline
+       * computes the same position for the same vertex even under fast math; depth
+       * pre-passes rely on it. Metal honours it with preserveInvariance (mtl_compiler.m). */
+      if (location == VARYING_SLOT_POS &&
+          ctx->shader->info.stage == MESA_SHADER_VERTEX)
+         P(ctx, ", invariant");
       P(ctx, "]]");
    }
 }

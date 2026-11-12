@@ -21,6 +21,104 @@
 #include "kosmickrisp/bridge/vk_to_mtl_map.h"
 #include "kosmickrisp/compiler/nir_to_msl.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* kosmickrisp-compat-switches: per-game shader-math controls, read from the game's environment.
+ * KK_SAFE_MATH: compile the game's shaders in Metal's safe math mode instead of fast. "1" or
+ *   "all": every shader. Otherwise a comma list of stages (vertex, fragment, compute) and/or
+ *   shader-hash prefixes written h<hex> (e.g. "compute,h0,h1"); a shader is safe when it matches
+ *   the listed stages (if any) and the listed hash prefixes (if any).
+ * KK_SAFE_MATH_LOG=1: print stage, hash and mode for every compiled shader.
+ * KK_DUMP_MSL=<dir>: save each shader's Metal source as <dir>/<stage>-<hash>.metal.
+ * The hash is FNV-1a of the generated Metal source, so it's stable between runs. */
+static const char *
+kk_msl_stage(const char *code)
+{
+   if (code && strstr(code, "\nvertex "))
+      return "vertex";
+   if (code && strstr(code, "\nfragment "))
+      return "fragment";
+   return "compute";
+}
+
+static void
+kk_msl_hash(const char *code, char hashHex[17])
+{
+   uint64_t hash = 0xcbf29ce484222325ull;
+   for (const unsigned char *c = (const unsigned char *)code; c && *c; c++)
+      hash = (hash ^ *c) * 0x100000001b3ull;
+   snprintf(hashHex, 17, "%016llx", (unsigned long long)hash);
+}
+
+static bool
+kk_safe_math_wanted(const char *setting, const char *stage, const char *hashHex)
+{
+   if (!setting || !setting[0] || strcmp(setting, "0") == 0)
+      return false;
+   if (strcmp(setting, "1") == 0 || strcmp(setting, "all") == 0)
+      return true;
+
+   char tokens[512];
+   snprintf(tokens, sizeof(tokens), "%s", setting);
+   bool hasStages = false, stageMatches = false, hasHashes = false, hashMatches = false;
+   for (char *saved = NULL, *token = strtok_r(tokens, ", ", &saved); token;
+        token = strtok_r(NULL, ", ", &saved)) {
+      if (token[0] == 'h' && token[1]) {
+         hasHashes = true;
+         if (strncasecmp(hashHex, token + 1, strlen(token + 1)) == 0)
+            hashMatches = true;
+      } else {
+         hasStages = true;
+         if (strcmp(token, stage) == 0)
+            stageMatches = true;
+      }
+   }
+   return (hasStages || hasHashes) && (!hasStages || stageMatches) &&
+          (!hasHashes || hashMatches);
+}
+
+static void
+kk_dump_msl(const char *dir, const char *stage, const char *hashHex, const char *code)
+{
+   char path[1024];
+   mkdir(dir, 0755);
+   snprintf(path, sizeof(path), "%s/%s-%s.metal", dir, stage, hashHex);
+   if (access(path, F_OK) == 0)
+      return;
+   FILE *file = fopen(path, "w");
+   if (file) {
+      fputs(code, file);
+      fclose(file);
+   }
+}
+
+static enum mtl_math_mode
+kk_game_math_mode(const char *code)
+{
+   const char *setting = getenv("KK_SAFE_MATH");
+   const char *logSetting = getenv("KK_SAFE_MATH_LOG");
+   const char *dumpDir = getenv("KK_DUMP_MSL");
+   bool wantLog = logSetting && logSetting[0] == '1';
+   if (!setting && !wantLog && !dumpDir)
+      return MTL_MATH_MODE_FAST;
+
+   const char *stage = kk_msl_stage(code);
+   char hashHex[17];
+   kk_msl_hash(code, hashHex);
+   bool safe = kk_safe_math_wanted(setting, stage, hashHex);
+
+   if (wantLog)
+      fprintf(stderr, "[kk] shader %-8s %s %s\n", stage, hashHex, safe ? "safe" : "fast");
+   if (dumpDir && dumpDir[0] && code)
+      kk_dump_msl(dumpDir, stage, hashHex, code);
+   return safe ? MTL_MATH_MODE_SAFE : MTL_MATH_MODE_FAST;
+}
+
 #include "nir_builder.h"
 #include "nir_lower_blend.h"
 
@@ -1216,7 +1314,7 @@ kk_compile_compute_pipeline(struct kk_device *device,
 
    mtl_library *library = mtl_new_library(
       device->mtl_compiler_handle, data->code, pdev->info.msl_version,
-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+      kk_game_math_mode(data->code), MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
    if (library == NULL)
       return VK_ERROR_INVALID_SHADER_NV;
 
@@ -1461,7 +1559,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
    const struct msl_compile_data *vs_data = &vs->msl_data[vs_stage];
    mtl_library *vertex_library = mtl_new_library(
       device->mtl_compiler_handle, vs_data->code, pdev->info.msl_version,
-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+      kk_game_math_mode(vs_data->code), MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
    if (vertex_library == NULL)
       return VK_ERROR_INVALID_SHADER_NV;
 
@@ -1472,7 +1570,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
    const struct msl_compile_data *fs_data = &vs->msl_data[MESA_SHADER_FRAGMENT];
    mtl_library *fragment_library = mtl_new_library(
       device->mtl_compiler_handle, fs_data->code, pdev->info.msl_version,
-      MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+      kk_game_math_mode(fs_data->code), MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
    if (fragment_library == NULL) {
       result = VK_ERROR_INVALID_SHADER_NV;
       goto destroy_vertex;

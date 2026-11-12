@@ -210,10 +210,23 @@ vk_device_init(struct vk_device *device,
    VkResult result =
       vk_physical_device_check_device_features(physical_device,
                                                pCreateInfo);
+   /* kosmickrisp-compat: idTech games (DOOM 2016, Wolfenstein II) enable
+    * features such as depthBounds without querying them, which pre-M5 GPUs
+    * lack. Accept the device and drop whatever the hardware doesn't support,
+    * as if the game had not asked for it. */
+   const bool compat_drop_features = result == VK_ERROR_FEATURE_NOT_PRESENT;
+   if (compat_drop_features)
+      result = VK_SUCCESS;
    if (result != VK_SUCCESS)
       return result;
 
    collect_enabled_features(device, pCreateInfo);
+   if (compat_drop_features) {
+      bool *enabled = (bool *)&device->enabled_features;
+      const bool *supported = (const bool *)&physical_device->supported_features;
+      for (size_t i = 0; i < sizeof(device->enabled_features); i++)
+         enabled[i] = enabled[i] && supported[i];
+   }
 
    p_atomic_set(&device->private_data_next_index, 0);
 

@@ -80,6 +80,12 @@ emit_sysvals(struct nir_to_msl_ctx *ctx, nir_shader *shader)
    unsigned i;
    BITSET_FOREACH_SET(i, shader->info.system_values_read, SYSTEM_VALUE_MAX) {
       const char *sysval;
+      /* kosmickrisp-vertex-subgroups: Metal has no SIMD-group attributes for
+       * vertex functions; emit_local_vars defines these two instead. */
+      if (shader->info.stage == MESA_SHADER_VERTEX &&
+          (i == SYSTEM_VALUE_SUBGROUP_SIZE ||
+           i == SYSTEM_VALUE_SUBGROUP_INVOCATION))
+         continue;
       if (is_frag_with_post_depth_coverage && i == SYSTEM_VALUE_SAMPLE_MASK_IN)
          sysval = sysval_sample_mask_in_post_depth_coverage;
       else
@@ -126,6 +132,17 @@ output_type(nir_shader *shader)
 static void
 emit_local_vars(struct nir_to_msl_ctx *ctx, nir_shader *shader)
 {
+   if (shader->info.stage == MESA_SHADER_VERTEX) {
+      /* kosmickrisp-vertex-subgroups: Apple GPUs run 32-wide SIMD groups, and at the top
+       * of the function every lane is active, so a lane's index is the number of active
+       * lanes before it. This is also how SPIRV-Cross handles vertex shaders. */
+      if (BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_SUBGROUP_SIZE))
+         P_IND(ctx, "uint gl_SubGroupSize = 32u;\n");
+      if (BITSET_TEST(shader->info.system_values_read,
+                      SYSTEM_VALUE_SUBGROUP_INVOCATION))
+         P_IND(ctx,
+               "uint gl_SubGroupInvocation = simd_prefix_exclusive_sum(1u);\n");
+   }
    if (shader->info.shared_size) {
       P_IND(ctx, "threadgroup char shared_data[%d];\n",
             shader->info.shared_size);
@@ -400,7 +417,18 @@ alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
       alu_funclike(ctx, instr, "subsat");
       break;
    case nir_op_fsat:
-      alu_funclike(ctx, instr, "saturate");
+      /* kosmickrisp-nan-safe-minmax: NIR defines fsat(NaN) = 0, and games rely on
+       * min/max/saturate to scrub NaNs (e.g. TAA history). Metal's fast math does not
+       * promise that, so check explicitly; vertex shaders and constants are skipped. */
+      if (ctx->shader->info.stage != MESA_SHADER_VERTEX &&
+          !nir_src_is_const(instr->src[0].src)) {
+         P(ctx, "(isnan(");
+         alu_src_to_msl(ctx, instr, 0);
+         P(ctx, ") ? %s(0) : ", msl_type_for_def(ctx->types, &instr->def));
+         alu_funclike(ctx, instr, "saturate");
+         P(ctx, ")");
+      } else
+         alu_funclike(ctx, instr, "saturate");
       break;
    /* Functions from <metal_relational> */
    case nir_op_fisfinite:
@@ -499,6 +527,22 @@ alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
        * value to int which then won't be able to demote for 16-bit values...
        */
       const bool is_min = instr->op == nir_op_fmin;
+      /* kosmickrisp-nan-safe-minmax: NIR's fmin/fmax return the non-NaN operand; keep
+       * that under fast math: "isnan(a) ? b : (isnan(b) ? a : (min/max))". */
+      unsigned nanGuards = 0;
+      if (ctx->shader->info.stage != MESA_SHADER_VERTEX) {
+         for (unsigned i = 0; i < 2; i++) {
+            if (nir_src_is_const(instr->src[i].src))
+               continue;
+            P(ctx, "(isnan(");
+            alu_src_to_msl(ctx, instr, i);
+            P(ctx, ") ? ");
+            alu_src_to_msl(ctx, instr, 1 - i);
+            P(ctx, " : ");
+            nanGuards++;
+         }
+      }
+      P(ctx, "(");
       if (nir_alu_instr_is_signed_zero_preserve(instr)) {
          const char *ftype = msl_type_for_def(ctx->types, &instr->def);
          const char *utype = msl_uint_type(instr->def.bit_size, 1);
@@ -510,6 +554,9 @@ alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
          P(ctx, "))) : ");
       }
       alu_funclike_precise(ctx, instr, is_min ? "fmin" : "fmax");
+      P(ctx, ")");
+      for (unsigned i = 0; i < nanGuards; i++)
+         P(ctx, ")");
       break;
    }
    case nir_op_frem:
