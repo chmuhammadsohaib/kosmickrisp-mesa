@@ -226,12 +226,41 @@ load_descriptor_for_idx_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    return load_descriptor(b, 4, 32, set, binding, index, 0, ctx);
 }
 
+/* An acceleration structure is the address of its descriptor, 8 bytes holding
+ * the MTLResourceID, like a handle slot (see kk_acceleration_structure.c). */
+static nir_def *
+descriptor_addr_for_idx_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
+                               const struct lower_descriptors_ctx *ctx)
+{
+   nir_def *index = nir_imm_int(b, 0);
+
+   while (intrin->intrinsic == nir_intrinsic_vulkan_resource_reindex) {
+      index = nir_iadd(b, index, intrin->src[1].ssa);
+      intrin = nir_src_as_intrinsic(intrin->src[0]);
+   }
+
+   assert(intrin->intrinsic == nir_intrinsic_vulkan_resource_index);
+   uint32_t set = nir_intrinsic_desc_set(intrin);
+   uint32_t binding = nir_intrinsic_binding(intrin);
+   index = nir_iadd(b, index, intrin->src[0].ssa);
+
+   const struct kk_descriptor_set_binding_layout *binding_layout =
+      get_binding_layout(set, binding, ctx);
+   if (ctx->clamp_desc_array_bounds)
+      index =
+         nir_umin(b, index, nir_imm_int(b, binding_layout->array_size - 1));
+
+   nir_def *offset = nir_iadd_imm(
+      b, nir_imul_imm(b, index, binding_layout->stride), binding_layout->offset);
+   return nir_iadd(b, load_descriptor_set_addr(b, set, ctx),
+                   nir_u2u64(b, offset));
+}
+
 static bool
 try_lower_load_vulkan_descriptor(nir_builder *b, nir_intrinsic_instr *intrin,
                                  const struct lower_descriptors_ctx *ctx)
 {
-   ASSERTED const nir_descriptor_type desc_type =
-      nir_intrinsic_desc_type(intrin);
+   const nir_descriptor_type desc_type = nir_intrinsic_desc_type(intrin);
    b->cursor = nir_before_instr(&intrin->instr);
 
    nir_intrinsic_instr *idx_intrin = nir_src_as_intrinsic(intrin->src[0]);
@@ -240,7 +269,11 @@ try_lower_load_vulkan_descriptor(nir_builder *b, nir_intrinsic_instr *intrin,
       return false;
    }
 
-   nir_def *desc = load_descriptor_for_idx_intrin(b, idx_intrin, ctx);
+   nir_def *desc;
+   if (desc_type == nir_descriptor_type_acceleration_structure)
+      desc = descriptor_addr_for_idx_intrin(b, idx_intrin, ctx);
+   else
+      desc = load_descriptor_for_idx_intrin(b, idx_intrin, ctx);
 
    nir_def_rewrite_uses(&intrin->def, desc);
 

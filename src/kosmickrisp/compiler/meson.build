@@ -9,6 +9,9 @@ libmsl_compiler_files = files(
     'msl_nir_gather_common.c',
     'msl_nir_lower_common.c',
     'msl_nir_lower_input_attachments.c',
+    'msl_nir_lower_ray_queries.c',
+    'msl_nir_lower_rt_io.c',
+    'msl_rt.c',
     'msl_nir_lower_subgroups.c',
 )
 

@@ -25,8 +25,12 @@
 #define VK_PIPELINE_H
 
 #include "vk_internal_exts.h"
+#include "vk_limits.h"
 #include "vk_object.h"
 #include "vk_util.h"
+
+#include "compiler/shader_enums.h"
+#include "util/mesa-blake3.h"
 
 #include <stdbool.h>
 
@@ -167,6 +171,55 @@ struct vk_pipeline {
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(vk_pipeline, base, VkPipeline,
                                VK_OBJECT_TYPE_PIPELINE);
+
+struct vk_pipeline_precomp_shader;
+struct vk_pipeline_layout;
+
+/* Exposed for drivers that link ray tracing pipelines themselves */
+struct vk_pipeline_stage {
+   mesa_shader_stage stage;
+
+   /* Whether the shader was linked with others (RT pipelines only) */
+   bool linked:1;
+   /* Whether the shader was imported from a library (Gfx pipelines only) */
+   bool imported:1;
+
+   /* Hash used to lookup the precomp */
+   blake3_hash precomp_key;
+
+   struct vk_pipeline_precomp_shader *precomp;
+
+   /* Hash used to lookup the shader */
+   blake3_hash shader_key;
+
+   struct vk_shader *shader;
+};
+
+struct vk_rt_shader_group {
+   VkRayTracingShaderGroupTypeKHR type;
+
+   struct vk_pipeline_stage stages[3];
+   uint32_t stage_count;
+};
+
+struct vk_rt_pipeline {
+   struct vk_pipeline base;
+
+   struct vk_pipeline_layout *layout;
+
+   uint32_t group_count;
+   struct vk_rt_shader_group *groups;
+
+   uint32_t stage_count;
+   struct vk_pipeline_stage *stages;
+
+   VkDeviceSize stack_size;
+   VkDeviceSize scratch_size;
+   uint32_t ray_queries;
+
+   uint8_t dynamic_descriptor_offsets[MESA_VK_MAX_DESCRIPTOR_SETS];
+};
+
 
 struct vk_pipeline_ops {
    void (*destroy)(struct vk_device *device,

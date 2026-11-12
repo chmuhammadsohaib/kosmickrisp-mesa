@@ -446,6 +446,12 @@ msl_emit_io_blocks(struct nir_to_msl_ctx *ctx, nir_shader *shader)
       break;
    case MESA_SHADER_COMPUTE:
    case MESA_SHADER_TESS_CTRL:
+   case MESA_SHADER_RAYGEN:
+   case MESA_SHADER_ANY_HIT:
+   case MESA_SHADER_CLOSEST_HIT:
+   case MESA_SHADER_MISS:
+   case MESA_SHADER_INTERSECTION:
+   case MESA_SHADER_CALLABLE:
       break;
    default:
       assert(0);

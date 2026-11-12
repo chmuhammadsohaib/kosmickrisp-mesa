@@ -48,6 +48,10 @@ kk_descriptor_stride_align_for_type(
       *stride = *alignment = sizeof(struct kk_storage_image_descriptor);
       break;
 
+   case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
+      *stride = *alignment = sizeof(struct kk_acceleration_structure_descriptor);
+      break;
+
    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
       *stride = *alignment = sizeof(struct kk_buffer_address);

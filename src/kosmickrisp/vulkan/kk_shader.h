@@ -104,6 +104,12 @@ struct kk_shader_info {
       struct {
          struct mtl_size local_size;
       } cs;
+
+      struct {
+         /* Outgoing payload area after the stage's frame, see
+          * msl_nir_lower_rt_io */
+         uint32_t out_size_B;
+      } rt;
    };
 };
 
@@ -118,6 +124,13 @@ struct kk_pipeline_handles {
          uint32_t pre_render_count;
       } gfx;
       mtl_compute_pipeline_state *cs;
+      /* Ray tracing stages are functions linked into each pipeline using
+       * them. Any-hit and intersection shaders add an intersection function
+       * for the intersection function buffer. */
+      struct {
+         mtl_binary_function *function;
+         mtl_binary_function *intersection;
+      } rt;
    };
 };
 
@@ -131,13 +144,21 @@ struct kk_shader {
 
    struct kk_pipeline_handles pipeline;
    struct kk_shader_info info;
-   struct msl_compile_data msl_data[MESA_SHADER_STAGES];
+   struct msl_compile_data msl_data[MESA_VULKAN_SHADER_STAGES];
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
                                VK_OBJECT_TYPE_SHADER_EXT);
 
 extern const struct vk_device_shader_ops kk_device_shader_ops;
+
+/* kk_rt_pipeline.c */
+void kk_cmd_set_rt_state(struct vk_command_buffer *cmd_buffer,
+                         struct vk_pipeline_layout *layout,
+                         VkDeviceSize scratch_size, uint32_t ray_queries,
+                         const uint8_t *dynamic_descriptor_offsets);
+void kk_cmd_set_stack_size(struct vk_command_buffer *cmd_buffer,
+                           VkDeviceSize stack_size);
 
 static inline nir_address_format
 kk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness)

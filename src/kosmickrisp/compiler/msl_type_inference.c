@@ -286,6 +286,89 @@ infer_types_from_intrinsic(struct hash_table *types, nir_intrinsic_instr *instr)
       set_type(types, &instr->def, TYPE_FLOAT);
       set_type(types, &instr->src[0], TYPE_UINT);
       break;
+   case nir_intrinsic_load_ray_world_origin:
+   case nir_intrinsic_load_ray_world_direction:
+   case nir_intrinsic_load_ray_object_origin:
+   case nir_intrinsic_load_ray_object_direction:
+   case nir_intrinsic_load_ray_t_min:
+   case nir_intrinsic_load_ray_t_max:
+   case nir_intrinsic_load_ray_object_to_world:
+   case nir_intrinsic_load_ray_world_to_object:
+   case nir_intrinsic_load_ray_triangle_vertex_positions:
+      set_type(types, &instr->def, TYPE_FLOAT);
+      break;
+   case nir_intrinsic_load_ray_launch_id:
+   case nir_intrinsic_load_ray_launch_size:
+   case nir_intrinsic_load_ray_hit_kind:
+   case nir_intrinsic_load_ray_flags:
+   case nir_intrinsic_load_ray_geometry_index:
+   case nir_intrinsic_load_ray_instance_custom_index:
+   case nir_intrinsic_load_cull_mask:
+   case nir_intrinsic_load_shader_record_ptr:
+   case nir_intrinsic_load_rt_payload_ptr_kk:
+   case nir_intrinsic_load_rt_attrib_ptr_kk:
+   case nir_intrinsic_load_rt_out_ptr_kk:
+      set_type(types, &instr->def, TYPE_UINT);
+      break;
+   case nir_intrinsic_trace_ray_kk:
+      for (unsigned i = 0; i < 11; i++) {
+         const bool is_float = i == 6 || i == 7 || i == 8 || i == 9;
+         set_type(types, &instr->src[i], is_float ? TYPE_FLOAT : TYPE_UINT);
+      }
+      break;
+   case nir_intrinsic_execute_callable_kk:
+      set_type(types, &instr->src[0], TYPE_UINT);
+      set_type(types, &instr->src[1], TYPE_UINT);
+      break;
+   case nir_intrinsic_report_ray_intersection:
+      set_type(types, &instr->def, TYPE_BOOL);
+      set_type(types, &instr->src[0], TYPE_FLOAT);
+      set_type(types, &instr->src[1], TYPE_UINT);
+      break;
+   case nir_intrinsic_rq_initialize:
+      for (unsigned i = 0; i < 4; i++)
+         set_type(types, &instr->src[i], TYPE_UINT);
+      for (unsigned i = 4; i < 8; i++)
+         set_type(types, &instr->src[i], TYPE_FLOAT);
+      break;
+   case nir_intrinsic_rq_proceed:
+      set_type(types, &instr->def, TYPE_BOOL);
+      set_type(types, &instr->src[0], TYPE_UINT);
+      break;
+   case nir_intrinsic_rq_terminate:
+   case nir_intrinsic_rq_confirm_intersection:
+      set_type(types, &instr->src[0], TYPE_UINT);
+      break;
+   case nir_intrinsic_rq_generate_intersection:
+      set_type(types, &instr->src[0], TYPE_UINT);
+      set_type(types, &instr->src[1], TYPE_FLOAT);
+      break;
+   case nir_intrinsic_rq_load: {
+      set_type(types, &instr->src[0], TYPE_UINT);
+      ti_type type = TYPE_UINT;
+      switch (nir_intrinsic_ray_query_value(instr)) {
+      case nir_ray_query_value_intersection_t:
+      case nir_ray_query_value_intersection_barycentrics:
+      case nir_ray_query_value_intersection_object_ray_direction:
+      case nir_ray_query_value_intersection_object_ray_origin:
+      case nir_ray_query_value_intersection_object_to_world:
+      case nir_ray_query_value_intersection_world_to_object:
+      case nir_ray_query_value_tmin:
+      case nir_ray_query_value_world_ray_direction:
+      case nir_ray_query_value_world_ray_origin:
+      case nir_ray_query_value_intersection_triangle_vertex_positions:
+         type = TYPE_FLOAT;
+         break;
+      case nir_ray_query_value_intersection_front_face:
+      case nir_ray_query_value_intersection_candidate_aabb_opaque:
+         type = TYPE_BOOL;
+         break;
+      default:
+         break;
+      }
+      set_type(types, &instr->def, type);
+      break;
+   }
    case nir_intrinsic_load_global_constant:
       set_type(types, &instr->def, TYPE_GENERIC_DATA);
       set_type(types, &instr->src[0], TYPE_UINT);

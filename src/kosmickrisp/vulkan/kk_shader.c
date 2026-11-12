@@ -19,6 +19,8 @@
 #include "kosmickrisp/bridge/mtl_bridge.h"
 #include "kosmickrisp/bridge/ns_process_info.h"
 #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+#include "kosmickrisp/compiler/msl_rt.h"
+#include "util/string_buffer.h"
 #include "kosmickrisp/compiler/nir_to_msl.h"
 
 #include <stdio.h>
@@ -837,6 +839,8 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
 
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
+   /* Ray tracing payloads are global addresses now */
+   NIR_PASS(_, nir, msl_nir_lower_rt_calls);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
             kk_buffer_addr_format(rs->storage_buffers));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
@@ -933,6 +937,11 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
    if (shader->info.stage == MESA_SHADER_COMPUTE) {
       mtl_release(pipe->cs);
       pipe->cs = NULL;
+   } else if (mesa_shader_stage_is_rt(shader->info.stage)) {
+      if (pipe->rt.function)
+         mtl_release(pipe->rt.function);
+      if (pipe->rt.intersection)
+         mtl_release(pipe->rt.intersection);
    } else if (shader->info.stage == MESA_SHADER_VERTEX) {
       /* Pre-render compute pipelines. */
       for (uint32_t i = 0u; i < pipe->gfx.pre_render_count; ++i) {
@@ -1012,6 +1021,17 @@ gather_shader_info(struct kk_shader *shader, nir_shader *nir,
       if (nir->info.fs.depth_layout == FRAG_DEPTH_LAYOUT_NONE)
          nir->info.fs.depth_layout = FRAG_DEPTH_LAYOUT_ANY;
       shader->info.fs.uses_flat_varyings = fs_uses_flat_varying(nir);
+   } else if (mesa_shader_stage_is_rt(nir->info.stage)) {
+      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_load_rt_out_ptr_kk)
+               shader->info.rt.out_size_B =
+                  MAX2(shader->info.rt.out_size_B,
+                       nir_intrinsic_range(nir_instr_as_intrinsic(instr)));
+         }
+      }
    } else if (nir->info.stage == MESA_SHADER_COMPUTE) {
       shader->info.cs.local_size.x = nir->info.workgroup_size[0];
       shader->info.cs.local_size.y = nir->info.workgroup_size[1];
@@ -1077,6 +1097,75 @@ kk_nir_lower_vertex_id_zero_base(struct nir_shader *nir)
                    SYSTEM_VALUE_VERTEX_ID_ZERO_BASE);
    }
    return progress;
+}
+
+/* Every ray tracing stage of a pipeline is linked into one Metal pipeline, so
+ * each needs its own function name. It comes from the code, which keeps it
+ * stable across pipeline cache loads. */
+static void
+kk_rt_name_entrypoint(nir_shader *nir, struct msl_compile_data *data)
+{
+   char hash[17];
+   kk_msl_hash(data->code, hash);
+
+   char name[64];
+   snprintf(name, sizeof(name), "kk_rt_%s_%s",
+            _mesa_shader_stage_to_abbrev(nir->info.stage), hash);
+
+   const char *placeholder = MSL_RT_ENTRY_PLACEHOLDER;
+   const size_t placeholder_len = strlen(placeholder);
+   struct _mesa_string_buffer *out =
+      _mesa_string_buffer_create(NULL, strlen(data->code) + 256);
+   for (const char *c = data->code; *c;) {
+      if (strncmp(c, placeholder, placeholder_len) == 0) {
+         _mesa_string_buffer_append(out, name);
+         c += placeholder_len;
+      } else {
+         _mesa_string_buffer_append_len(out, c, 1);
+         c++;
+      }
+   }
+   ralloc_free(data->code);
+   data->code = ralloc_strdup(NULL, out->buf);
+   _mesa_string_buffer_destroy(out);
+
+   nir_function *entry = nir_shader_get_entrypoint(nir)->function;
+   ralloc_free((void *)entry->name);
+   entry->name = ralloc_strdup(entry, name);
+}
+
+static VkResult
+kk_compile_rt_functions(struct kk_device *dev, struct kk_shader *shader)
+{
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+   const struct msl_compile_data *data = &shader->msl_data[shader->info.stage];
+
+   mtl_library *library = mtl_new_library(
+      dev->mtl_compiler_handle, data->code, pdev->info.msl_version,
+      kk_game_math_mode(data->code), MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
+   if (library == NULL)
+      return VK_ERROR_INVALID_SHADER_NV;
+
+   /* Any-hit and intersection shaders are only reached through their
+    * intersection function; the others are visible functions. */
+   VkResult result = VK_SUCCESS;
+   if (shader->info.stage == MESA_SHADER_ANY_HIT ||
+       shader->info.stage == MESA_SHADER_INTERSECTION) {
+      char name[80];
+      snprintf(name, sizeof(name), "%s_ifb", data->entrypoint_name);
+      shader->pipeline.rt.intersection =
+         mtl_new_binary_function(dev->mtl_compiler_handle, library, name);
+      if (shader->pipeline.rt.intersection == NULL)
+         result = VK_ERROR_INVALID_SHADER_NV;
+   } else {
+      shader->pipeline.rt.function = mtl_new_binary_function(
+         dev->mtl_compiler_handle, library, data->entrypoint_name);
+      if (shader->pipeline.rt.function == NULL)
+         result = VK_ERROR_INVALID_SHADER_NV;
+   }
+
+   mtl_release(library);
+   return result;
 }
 
 static VkResult
@@ -1195,6 +1284,8 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
 
    struct msl_compile_data *data = &shader->msl_data[stage];
    data->code = nir_to_msl(nir, &translate_options);
+   if (mesa_shader_stage_is_rt(stage))
+      kk_rt_name_entrypoint(nir, data);
    const char *entrypoint_name = nir_shader_get_entrypoint(nir)->function->name;
 
    /* We need to steal so it doesn't get destroyed with the nir. Needs to happen
@@ -1726,7 +1817,10 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
     * 2. Graphics with all stages (since we don't support GPL nor shader
     * objects for now). This will be addressed later.
     */
-   if (shaders[0]->vk.stage == MESA_SHADER_COMPUTE) {
+   if (mesa_shader_stage_is_rt(shaders[0]->vk.stage)) {
+      for (uint32_t i = 0; i < shader_count && result == VK_SUCCESS; i++)
+         result = kk_compile_rt_functions(dev, shaders[i]);
+   } else if (shaders[0]->vk.stage == MESA_SHADER_COMPUTE) {
       struct kk_shader *s = shaders[0];
       uint32_t local_size_threads = s->info.cs.local_size.x *
                                     s->info.cs.local_size.y *
@@ -1852,6 +1946,8 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
          &shader->pipeline.cs);
    } else if (info.stage == MESA_SHADER_VERTEX) {
       result = kk_compile_graphics_pipeline(dev, shader);
+   } else if (mesa_shader_stage_is_rt(info.stage)) {
+      result = kk_compile_rt_functions(dev, shader);
    }
 
    if (result != VK_SUCCESS)
@@ -1979,4 +2075,6 @@ const struct vk_device_shader_ops kk_device_shader_ops = {
    .deserialize = kk_deserialize_shader,
    .cmd_set_dynamic_graphics_state = vk_cmd_set_dynamic_graphics_state,
    .cmd_bind_shaders = kk_cmd_bind_shaders,
+   .cmd_set_rt_state = kk_cmd_set_rt_state,
+   .cmd_set_stack_size = kk_cmd_set_stack_size,
 };

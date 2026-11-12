@@ -51,6 +51,8 @@ idep_kk_device_dispatch_table = declare_dependency(
 
 kk_files = files(
   'kk_bo.h',
+  'kk_acceleration_structure.c',
+  'kk_acceleration_structure.h',
   'kk_bo.c',
   'kk_buffer_view.h',
   'kk_buffer_view.c',
@@ -102,6 +104,7 @@ kk_files = files(
   'kk_query_pool.c',
   'kk_query_table.h',
   'kk_query_table.c',
+  'kk_rt_pipeline.c',
   'kk_queue.h',
   'kk_queue.c',
   'kk_sampler.h',

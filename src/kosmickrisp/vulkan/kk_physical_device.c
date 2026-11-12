@@ -7,6 +7,8 @@
 
 #include "kk_physical_device.h"
 
+#include "kk_acceleration_structure.h"
+
 #include "kk_debug.h"
 #include "kk_entrypoints.h"
 #include "kk_image.h"
@@ -255,6 +257,11 @@ kk_get_device_extensions(const struct kk_instance *instance,
 
       .AMD_shader_image_load_store_lod = true,
       .AMD_buffer_marker = true,
+
+      /* kosmickrisp-ray-tracing: in development, off unless KK_RAY_TRACING=1 */
+      .KHR_acceleration_structure = pdev->settings.ray_tracing_enabled,
+      .KHR_ray_query = pdev->settings.ray_tracing_enabled,
+      .KHR_ray_tracing_pipeline = pdev->settings.ray_tracing_enabled,
    };
 }
 
@@ -357,6 +364,26 @@ kk_get_device_features(
       .timelineSemaphore = true,
       .uniformAndStorageBuffer8BitAccess = true,
       .uniformBufferStandardLayout = true,
+
+      /* VK_KHR_acceleration_structure */
+      .accelerationStructure = supported_extensions->KHR_acceleration_structure,
+      .accelerationStructureCaptureReplay = false,
+      .accelerationStructureIndirectBuild = false,
+      .accelerationStructureHostCommands = false,
+      .descriptorBindingAccelerationStructureUpdateAfterBind =
+         supported_extensions->KHR_acceleration_structure,
+
+      /* VK_KHR_ray_query */
+      .rayQuery = supported_extensions->KHR_ray_query,
+
+      /* VK_KHR_ray_tracing_pipeline */
+      .rayTracingPipeline = supported_extensions->KHR_ray_tracing_pipeline,
+      .rayTracingPipelineShaderGroupHandleCaptureReplay = false,
+      .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
+      .rayTracingPipelineTraceRaysIndirect =
+         supported_extensions->KHR_ray_tracing_pipeline,
+      .rayTraversalPrimitiveCulling =
+         supported_extensions->KHR_ray_tracing_pipeline,
 
       /* Vulkan 1.3 */
       .bufferDeviceAddress = true,
@@ -792,6 +819,30 @@ kk_get_device_properties(
       .maxTimelineSemaphoreValueDifference = UINT64_MAX,
       .framebufferIntegerColorSampleCounts = sample_counts,
 
+      /* VK_KHR_acceleration_structure: Vulkan's minimum limits. Metal's
+       * default (not extended) limits cover them. */
+      .maxGeometryCount = (1u << 24) - 1,
+      .maxInstanceCount = (1u << 24) - 1,
+      .maxPrimitiveCount = (1u << 29) - 1,
+      .maxPerStageDescriptorAccelerationStructures = KK_MAX_DESCRIPTORS,
+      .maxPerStageDescriptorUpdateAfterBindAccelerationStructures =
+         KK_MAX_DESCRIPTORS,
+      .maxDescriptorSetAccelerationStructures = KK_MAX_DESCRIPTORS,
+      .maxDescriptorSetUpdateAfterBindAccelerationStructures =
+         KK_MAX_DESCRIPTORS,
+      .minAccelerationStructureScratchOffsetAlignment = KK_AS_SCRATCH_ALIGNMENT,
+
+      /* VK_KHR_ray_tracing_pipeline. Metal reads 12 bits of the intersection
+       * function buffer stride, which is the hit group stride. */
+      .shaderGroupHandleSize = 32,
+      .maxRayRecursionDepth = 31,
+      .maxShaderGroupStride = 4064,
+      .shaderGroupBaseAlignment = 64,
+      .shaderGroupHandleCaptureReplaySize = 32,
+      .maxRayDispatchInvocationCount = 1u << 30,
+      .shaderGroupHandleAlignment = 32,
+      .maxRayHitAttributeSize = 32,
+
       /* Vulkan 1.3 properties */
       .minSubgroupSize = 32,
       .maxSubgroupSize = 32,
@@ -1131,6 +1182,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
 
    settings->gpu_capture_enabled =
       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
+   settings->ray_tracing_enabled =
+      debug_get_bool_option("KK_RAY_TRACING", false);
 
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";

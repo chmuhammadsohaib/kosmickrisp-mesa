@@ -9,6 +9,8 @@
 
 #include "kk_query_pool.h"
 
+#include "kk_acceleration_structure.h"
+
 #include "kosmickrisp/libkk/kk_query.h"
 
 #include "kk_bo.h"
@@ -37,6 +39,10 @@ kk_reports_per_query(struct kk_query_pool *pool)
    switch (pool->vk.query_type) {
    case VK_QUERY_TYPE_OCCLUSION:
    case VK_QUERY_TYPE_TIMESTAMP:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_BOTTOM_LEVEL_POINTERS_KHR:
+   case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
       return 1;
    default:
       UNREACHABLE("Unsupported query type");
@@ -195,7 +201,15 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
          /* We increment as we go so we can clean up properly if we run out */
          remap_index[pool->oq.queries++] = index;
       }
-   } else if (kk_pool_is_ts(pool)) {
+   } else if (!kk_pool_is_ts(pool)) {
+      /* Acceleration structure properties live in this pool's own BO, one
+       * report per query, so the index map is the identity. */
+      uint16_t *remap_index = kk_pool_index_ptr(pool);
+      for (unsigned i = 0; i < pool->vk.query_count; ++i)
+         remap_index[i] = i;
+   }
+
+   if (kk_pool_is_ts(pool)) {
       /* Timestamps are sampled into a Metal counter heap (one entry per query)
        * and resolved into `bo` after the GPU writes them. */
       pool->ts.heap =
@@ -589,4 +603,54 @@ kk_CmdCopyQueryPoolResultsToMemoryKHR(
       .reports_per_query = kk_reports_per_query(pool),
    };
    libkk_copy_queries_struct(cmd, kk_grid_1d(queryCount), false, args);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+kk_CmdWriteAccelerationStructuresPropertiesKHR(
+   VkCommandBuffer commandBuffer, uint32_t accelerationStructureCount,
+   const VkAccelerationStructureKHR *pAccelerationStructures,
+   VkQueryType queryType, VkQueryPool queryPool, uint32_t firstQuery)
+{
+   VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+
+   mtl_compute_encoder *encoder = cs_get_compute(cmd);
+
+   for (uint32_t i = 0; i < accelerationStructureCount; i++) {
+      VK_FROM_HANDLE(kk_acceleration_structure, as, pAccelerationStructures[i]);
+      const uint64_t report = kk_query_report_addr(dev, pool, firstQuery + i);
+
+      uint64_t value = 0;
+      switch (queryType) {
+      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR:
+         /* Metal writes the 64-bit size itself */
+         mtl_write_compacted_acceleration_structure_size(encoder, as->mtl_handle,
+                                                         report);
+         continue;
+      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_SIZE_KHR:
+         value = kk_acceleration_structure_serialized_size(as);
+         break;
+      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SIZE_KHR:
+         value = as->vk.size;
+         break;
+      case VK_QUERY_TYPE_ACCELERATION_STRUCTURE_SERIALIZATION_BOTTOM_LEVEL_POINTERS_KHR:
+      default:
+         break;
+      }
+
+      kk_cmd_write(cmd, (struct libkk_imm_write){report, value});
+      kk_cmd_write(cmd, (struct libkk_imm_write){report + 4, value >> 32});
+   }
+
+   /* Sizes are written on the acceleration structure stage; make them visible
+    * before the availability writes, which are dispatches. */
+   encoder = cs_get_compute(cmd);
+   mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_ACCELERATION_STRUCTURE,
+                                    MTL_STAGE_DISPATCH);
+
+   for (uint32_t i = 0; i < accelerationStructureCount; i++) {
+      kk_cmd_write(cmd, (struct libkk_imm_write){
+                           kk_query_available_addr(pool, firstQuery + i), true});
+   }
 }

@@ -100,6 +100,28 @@ struct kk_device {
 
    struct vk_meta_device meta;
 
+   /* 8-byte slots holding acceleration structure resource IDs. A slot's GPU
+    * address is the acceleration structure's device address, so slots never
+    * move. See kk_acceleration_structure.c */
+   struct {
+      simple_mtx_t mutex;
+      struct util_dynarray bos;  /* struct kk_bo *, KK_AS_SLOTS_PER_BO each */
+      struct util_dynarray free; /* uint32_t slot indices */
+      uint32_t count;
+   } as_slots;
+
+   /* Ray tracing pipelines: the dispatch kernel and default hit group
+    * functions, built on first use, and each pipeline's Metal linking. See
+    * kk_rt_pipeline.c */
+   struct {
+      simple_mtx_t mutex;
+      mtl_library *library;
+      mtl_function_descriptor *kernel;
+      mtl_binary_function *default_triangle;
+      mtl_binary_function *default_box;
+      struct hash_table *links; /* struct vk_pipeline * -> kk_rt_link */
+   } rt;
+
    /* Geomtry heap */
    struct kk_bo *heap;
    util_once_flag heap_init_once;
@@ -125,6 +147,16 @@ void kk_device_add_buffer_to_residency_set(struct kk_device *dev,
 void kk_device_remove_buffer_from_residency_set(struct kk_device *dev,
                                                 mtl_buffer *buffer);
 void kk_device_make_resources_resident(struct kk_device *dev);
+void kk_device_add_acceleration_structure_to_residency_set(
+   struct kk_device *dev, mtl_acceleration_structure *as);
+void kk_device_remove_acceleration_structure_from_residency_set(
+   struct kk_device *dev, mtl_acceleration_structure *as);
+
+void kk_device_init_rt(struct kk_device *dev);
+void kk_device_finish_rt(struct kk_device *dev);
+
+void kk_device_init_as_slots(struct kk_device *dev);
+void kk_device_finish_as_slots(struct kk_device *dev);
 
 /* Required to create a sampler */
 mtl_sampler *kk_sampler_create(struct kk_device *dev,

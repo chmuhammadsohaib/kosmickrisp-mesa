@@ -42,6 +42,15 @@ static_assert(sizeof(struct kk_storage_image_descriptor) == 8,
               "kk_storage_image_descriptor has no holes");
 
 /* This has to match nir_address_format_64bit_bounded_global */
+/* The structure's MTLResourceID, what a handle slot also holds (see
+ * kk_acceleration_structure.c), so shaders load handles the same way from
+ * descriptors and from device addresses. */
+struct kk_acceleration_structure_descriptor {
+   uint64_t resource_id;
+};
+static_assert(sizeof(struct kk_acceleration_structure_descriptor) == 8,
+              "kk_acceleration_structure_descriptor has no holes");
+
 struct kk_buffer_address {
    uint64_t base_addr;
    uint32_t size;

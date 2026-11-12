@@ -5,6 +5,7 @@
  */
 
 #include "nir_to_msl.h"
+#include "msl_rt.h"
 #include "msl_private.h"
 #include "nir.h"
 #include "nir_builder.h"
@@ -142,6 +143,15 @@ emit_local_vars(struct nir_to_msl_ctx *ctx, nir_shader *shader)
                       SYSTEM_VALUE_SUBGROUP_INVOCATION))
          P_IND(ctx,
                "uint gl_SubGroupInvocation = simd_prefix_exclusive_sum(1u);\n");
+   }
+   if (shader->info.ray_queries) {
+      /* See msl_nir_lower_ray_queries. rq_flags keeps each query's ray flags,
+       * which Metal can't return. */
+      P_IND(ctx,
+            "raytracing::intersection_query<raytracing::instancing, "
+            "raytracing::triangle_data> rq[%u];\n",
+            shader->info.ray_queries);
+      P_IND(ctx, "uint rq_flags[%u];\n", shader->info.ray_queries);
    }
    if (shader->info.shared_size) {
       P_IND(ctx, "threadgroup char shared_data[%d];\n",
@@ -1125,6 +1135,309 @@ global_access_qualifier(struct nir_to_msl_ctx *ctx,
    return access & ACCESS_COHERENT ? "coherent device" : "device";
 }
 
+/* Ray flags from SPV_KHR_ray_query */
+#define MSL_RAY_FLAG_OPAQUE                 0x1u
+#define MSL_RAY_FLAG_NO_OPAQUE              0x2u
+#define MSL_RAY_FLAG_TERMINATE_ON_FIRST_HIT 0x4u
+#define MSL_RAY_FLAG_CULL_BACK_FACING       0x10u
+#define MSL_RAY_FLAG_CULL_FRONT_FACING      0x20u
+#define MSL_RAY_FLAG_CULL_OPAQUE            0x40u
+#define MSL_RAY_FLAG_CULL_NO_OPAQUE         0x80u
+#define MSL_RAY_FLAG_SKIP_TRIANGLES         0x100u
+#define MSL_RAY_FLAG_SKIP_AABBS             0x200u
+
+static void
+rq_index_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+{
+   P(ctx, "rq[");
+   src_to_msl(ctx, &instr->src[0]);
+   P(ctx, "]");
+}
+
+/* Ray flags are runtime values, so each Metal parameter is picked with a
+ * conditional. The acceleration structure source is the address of 8 bytes
+ * holding its MTLResourceID (a descriptor or a handle slot), 0 for none. */
+static void
+rq_initialize_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+{
+   P_IND(ctx, "{\n");
+   ctx->indentlevel++;
+   P_IND(ctx, "uint f = ");
+   src_to_msl(ctx, &instr->src[2]);
+   P(ctx, ";\n");
+   P_IND(ctx, "raytracing::intersection_params p;\n");
+   P_IND(ctx,
+         "p.force_opacity((f & %#xu) ? raytracing::forced_opacity::opaque : "
+         "(f & %#xu) ? raytracing::forced_opacity::non_opaque : "
+         "raytracing::forced_opacity::none);\n",
+         MSL_RAY_FLAG_OPAQUE, MSL_RAY_FLAG_NO_OPAQUE);
+   P_IND(ctx,
+         "p.set_opacity_cull_mode((f & %#xu) ? "
+         "raytracing::opacity_cull_mode::opaque : (f & %#xu) ? "
+         "raytracing::opacity_cull_mode::non_opaque : "
+         "raytracing::opacity_cull_mode::none);\n",
+         MSL_RAY_FLAG_CULL_OPAQUE, MSL_RAY_FLAG_CULL_NO_OPAQUE);
+   P_IND(ctx,
+         "p.set_triangle_cull_mode((f & %#xu) ? "
+         "raytracing::triangle_cull_mode::back : (f & %#xu) ? "
+         "raytracing::triangle_cull_mode::front : "
+         "raytracing::triangle_cull_mode::none);\n",
+         MSL_RAY_FLAG_CULL_BACK_FACING, MSL_RAY_FLAG_CULL_FRONT_FACING);
+   P_IND(ctx,
+         "p.set_geometry_cull_mode((f & %#xu) ? "
+         "raytracing::geometry_cull_mode::triangle : (f & %#xu) ? "
+         "raytracing::geometry_cull_mode::bounding_box : "
+         "raytracing::geometry_cull_mode::none);\n",
+         MSL_RAY_FLAG_SKIP_TRIANGLES, MSL_RAY_FLAG_SKIP_AABBS);
+   P_IND(ctx, "p.accept_any_intersection((f & %#xu) != 0u);\n",
+         MSL_RAY_FLAG_TERMINATE_ON_FIRST_HIT);
+   P_IND(ctx, "rq_flags[");
+   src_to_msl(ctx, &instr->src[0]);
+   P(ctx, "] = f;\n");
+   P_IND(ctx, "ulong as_addr = ");
+   src_to_msl(ctx, &instr->src[1]);
+   P(ctx, ";\n");
+   P_IND(ctx, "");
+   rq_index_to_msl(ctx, instr);
+   P(ctx, ".reset(raytracing::ray(");
+   src_to_msl(ctx, &instr->src[4]);
+   P(ctx, ", ");
+   src_to_msl(ctx, &instr->src[6]);
+   P(ctx, ", ");
+   src_to_msl(ctx, &instr->src[5]);
+   P(ctx, ", ");
+   src_to_msl(ctx, &instr->src[7]);
+   P(ctx, "), as_addr ? *(constant raytracing::instance_acceleration_structure "
+          "*)as_addr : raytracing::instance_acceleration_structure(), ");
+   src_to_msl(ctx, &instr->src[3]);
+   P(ctx, ", p);\n");
+   ctx->indentlevel--;
+   P_IND(ctx, "}\n");
+}
+
+static void
+rq_load_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+{
+   const char *which = nir_intrinsic_committed(instr) ? "committed" : "candidate";
+
+   switch (nir_intrinsic_ray_query_value(instr)) {
+   case nir_ray_query_value_intersection_type:
+      /* Committed: none 0, triangle 1, generated 2. Candidate: triangle 0,
+       * AABB 1. */
+      if (nir_intrinsic_committed(instr)) {
+         P(ctx, "(");
+         rq_index_to_msl(ctx, instr);
+         P(ctx, ".get_committed_intersection_type() == "
+                "raytracing::intersection_type::triangle ? 1u : ");
+         rq_index_to_msl(ctx, instr);
+         P(ctx, ".get_committed_intersection_type() == "
+                "raytracing::intersection_type::bounding_box ? 2u : 0u)");
+      } else {
+         P(ctx, "(");
+         rq_index_to_msl(ctx, instr);
+         P(ctx, ".get_candidate_intersection_type() == "
+                "raytracing::intersection_type::triangle ? 0u : 1u)");
+      }
+      break;
+   case nir_ray_query_value_intersection_t:
+      rq_index_to_msl(ctx, instr);
+      if (nir_intrinsic_committed(instr)) {
+         P(ctx, ".get_committed_distance()");
+      } else {
+         P(ctx, ".get_candidate_triangle_distance()");
+      }
+      break;
+   case nir_ray_query_value_intersection_instance_custom_index:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_user_instance_id()", which);
+      break;
+   case nir_ray_query_value_intersection_instance_id:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_instance_id()", which);
+      break;
+   case nir_ray_query_value_intersection_instance_sbt_index:
+      /* TODO_KOSMICKRISP: Metal doesn't return the instance's intersection
+       * function table offset to intersection queries. */
+      P(ctx, "0u");
+      break;
+   case nir_ray_query_value_intersection_geometry_index:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_geometry_id()", which);
+      break;
+   case nir_ray_query_value_intersection_primitive_index:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_primitive_id()", which);
+      break;
+   case nir_ray_query_value_intersection_barycentrics:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_triangle_barycentric_coord()", which);
+      break;
+   case nir_ray_query_value_intersection_front_face:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".is_%s_triangle_front_facing()", which);
+      break;
+   case nir_ray_query_value_intersection_object_ray_direction:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_ray_direction()", which);
+      break;
+   case nir_ray_query_value_intersection_object_ray_origin:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_ray_origin()", which);
+      break;
+   case nir_ray_query_value_intersection_object_to_world:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_object_to_world_transform()[%u]", which,
+        nir_intrinsic_column(instr));
+      break;
+   case nir_ray_query_value_intersection_world_to_object:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_%s_world_to_object_transform()[%u]", which,
+        nir_intrinsic_column(instr));
+      break;
+   case nir_ray_query_value_intersection_candidate_aabb_opaque:
+      P(ctx, "!");
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".is_candidate_non_opaque_bounding_box()");
+      break;
+   case nir_ray_query_value_tmin:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_ray_min_distance()");
+      break;
+   case nir_ray_query_value_flags:
+      P(ctx, "rq_flags[");
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, "]");
+      break;
+   case nir_ray_query_value_world_ray_direction:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_world_space_ray_direction()");
+      break;
+   case nir_ray_query_value_world_ray_origin:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".get_world_space_ray_origin()");
+      break;
+   case nir_ray_query_value_intersection_triangle_vertex_positions:
+      /* TODO_KOSMICKRISP: needs Metal's primitive data for position fetch */
+      P(ctx, "float3(0.0f)");
+      break;
+   default:
+      UNREACHABLE("Unhandled ray query value");
+   }
+   P(ctx, ";\n");
+}
+
+/* Ray tracing stages read their state from the kk_rt_call frame they are
+ * called with (msl_rt.c). Returns false for intrinsics handled elsewhere. */
+static bool
+rt_intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+{
+   switch (instr->intrinsic) {
+   case nir_intrinsic_load_ray_launch_id:
+      P(ctx, "call->launch_id;\n");
+      return true;
+   case nir_intrinsic_load_ray_launch_size:
+      P(ctx, "call->launch_size;\n");
+      return true;
+   case nir_intrinsic_load_ray_world_origin:
+      P(ctx, "call->world_origin;\n");
+      return true;
+   case nir_intrinsic_load_ray_world_direction:
+      P(ctx, "call->world_direction;\n");
+      return true;
+   case nir_intrinsic_load_ray_object_origin:
+      P(ctx, "call->object_origin;\n");
+      return true;
+   case nir_intrinsic_load_ray_object_direction:
+      P(ctx, "call->object_direction;\n");
+      return true;
+   case nir_intrinsic_load_ray_t_min:
+      P(ctx, "call->tmin;\n");
+      return true;
+   case nir_intrinsic_load_ray_t_max:
+      P(ctx, "call->tmax;\n");
+      return true;
+   case nir_intrinsic_load_ray_object_to_world:
+      P(ctx, "call->object_to_world[%u];\n", nir_intrinsic_column(instr));
+      return true;
+   case nir_intrinsic_load_ray_world_to_object:
+      P(ctx, "call->world_to_object[%u];\n", nir_intrinsic_column(instr));
+      return true;
+   case nir_intrinsic_load_ray_hit_kind:
+      P(ctx, "call->hit_kind;\n");
+      return true;
+   case nir_intrinsic_load_ray_flags:
+      P(ctx, "call->ray_flags;\n");
+      return true;
+   case nir_intrinsic_load_ray_geometry_index:
+      P(ctx, "call->geometry_index;\n");
+      return true;
+   case nir_intrinsic_load_ray_instance_custom_index:
+      P(ctx, "call->custom_index;\n");
+      return true;
+   case nir_intrinsic_load_primitive_id:
+      P(ctx, "call->primitive_id;\n");
+      return true;
+   case nir_intrinsic_load_instance_id:
+      P(ctx, "call->instance_id;\n");
+      return true;
+   case nir_intrinsic_load_cull_mask:
+      P(ctx, "call->cull_mask;\n");
+      return true;
+   case nir_intrinsic_load_shader_record_ptr:
+      P(ctx, "call->record + %uu;\n", MSL_RT_HANDLE_SIZE);
+      return true;
+   case nir_intrinsic_load_ray_triangle_vertex_positions:
+      /* TODO_KOSMICKRISP: position fetch */
+      P(ctx, "float3(0.0f);\n");
+      return true;
+   case nir_intrinsic_load_rt_payload_ptr_kk:
+      P(ctx, "call->payload;\n");
+      return true;
+   case nir_intrinsic_load_rt_attrib_ptr_kk:
+      /* Intersection shaders write candidate attributes, kept apart until
+       * the hit is reported. */
+      if (ctx->shader->info.stage == MESA_SHADER_INTERSECTION) {
+         P(ctx, "(ulong)&call->isec_attribs[0];\n");
+      } else {
+         P(ctx, "(ulong)&call->attribs[0];\n");
+      }
+      return true;
+   case nir_intrinsic_load_rt_out_ptr_kk:
+      P(ctx, "(ulong)call + KK_RT_FRAME_SIZE;\n");
+      return true;
+   case nir_intrinsic_trace_ray_kk:
+      P_IND(ctx, "kk_rt_trace_ray(call");
+      for (unsigned i = 0; i < 11; i++) {
+         P(ctx, ", ");
+         src_to_msl(ctx, &instr->src[i]);
+      }
+      P(ctx, ");\n");
+      return true;
+   case nir_intrinsic_execute_callable_kk:
+      P_IND(ctx, "kk_rt_execute_callable(call, ");
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, ", ");
+      src_to_msl(ctx, &instr->src[1]);
+      P(ctx, ");\n");
+      return true;
+   case nir_intrinsic_report_ray_intersection:
+      P(ctx, "kk_rt_report_intersection(call, ");
+      src_to_msl(ctx, &instr->src[0]);
+      P(ctx, ", ");
+      src_to_msl(ctx, &instr->src[1]);
+      P(ctx, ");\n");
+      return true;
+   case nir_intrinsic_ignore_ray_intersection:
+      P_IND(ctx, "call->ahit_status = %uu;\n", MSL_RT_AHIT_IGNORE);
+      return true;
+   case nir_intrinsic_terminate_ray:
+      P_IND(ctx, "call->ahit_status = %uu;\n", MSL_RT_AHIT_TERMINATE);
+      return true;
+   default:
+      return false;
+   }
+}
+
 static void
 intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
 {
@@ -1141,6 +1454,9 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
    if (instrinsic_needs_dest_type(instr)) {
       P_IND(ctx, "t%d = ", instr->def.index);
    }
+   if (mesa_shader_stage_is_rt(ctx->shader->info.stage) &&
+       rt_intrinsic_to_msl(ctx, instr))
+      return;
    switch (instr->intrinsic) {
    case nir_intrinsic_decl_reg: {
       const char *reg_type = msl_uint_type(nir_intrinsic_bit_size(instr),
@@ -1600,6 +1916,33 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
          writemask_to_msl(ctx, nir_intrinsic_write_mask(instr),
                           instr->num_components);
       P(ctx, ";\n");
+      break;
+   case nir_intrinsic_rq_initialize:
+      rq_initialize_to_msl(ctx, instr);
+      break;
+   case nir_intrinsic_rq_proceed:
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".next();\n");
+      break;
+   case nir_intrinsic_rq_terminate:
+      P_IND(ctx, "");
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".abort();\n");
+      break;
+   case nir_intrinsic_rq_confirm_intersection:
+      P_IND(ctx, "");
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".commit_triangle_intersection();\n");
+      break;
+   case nir_intrinsic_rq_generate_intersection:
+      P_IND(ctx, "");
+      rq_index_to_msl(ctx, instr);
+      P(ctx, ".commit_bounding_box_intersection(");
+      src_to_msl(ctx, &instr->src[1]);
+      P(ctx, ");\n");
+      break;
+   case nir_intrinsic_rq_load:
+      rq_load_to_msl(ctx, instr);
       break;
    case nir_intrinsic_load_texture_handle_kk:
    case nir_intrinsic_load_depth_texture_kk:
@@ -2061,6 +2404,12 @@ jump_instr_to_msl(struct nir_to_msl_ctx *ctx, nir_jump_instr *jump)
 {
    switch (jump->type) {
    case nir_jump_halt:
+      /* After ignoreIntersection/terminateRay, the stage body returns */
+      if (mesa_shader_stage_is_rt(ctx->shader->info.stage)) {
+         P_IND(ctx, "return;\n");
+         break;
+      }
+      FALLTHROUGH;
    case nir_jump_abort:
       P_IND(ctx, "TODO: halt/abort\n");
       assert(!"Unimplemented");
@@ -2241,7 +2590,9 @@ rename_main_entrypoint(struct nir_shader *nir)
    /* Rename entrypoint to avoid MSL limitations after we've removed all others.
     * We don't really care what it's named as long as it's not "main"
     */
-   const char *entrypoint_name = "main_entrypoint";
+   const char *entrypoint_name = mesa_shader_stage_is_rt(nir->info.stage)
+                                    ? MSL_RT_ENTRY_PLACEHOLDER
+                                    : "main_entrypoint";
    nir_function_impl *entrypoint = nir_shader_get_entrypoint(nir);
    struct nir_function *function = entrypoint->function;
    ralloc_free((void *)function->name);
@@ -2265,6 +2616,10 @@ msl_preprocess_nir(struct nir_shader *nir)
    NIR_PASS(_, nir, nir_inline_functions);
    NIR_PASS(_, nir, nir_opt_deref);
    nir_remove_non_entrypoints(nir);
+
+   /* Before any pass touches the opaque ray query variables */
+   NIR_PASS(_, nir, msl_nir_lower_ray_queries);
+   NIR_PASS(_, nir, msl_nir_lower_rt_io);
 
    /* nir_lower_io_to_temporaries is required before nir_lower_blend since the
     * blending pass sinks writes to the end of the block where we may have a
@@ -2534,6 +2889,131 @@ msl_emit_constant_data(struct nir_to_msl_ctx *ctx, nir_shader *shader)
    P(ctx, "};\n");
 }
 
+/* Size of the outgoing payload area, see msl_nir_lower_rt_io */
+static unsigned
+rt_out_size(nir_function_impl *impl)
+{
+   unsigned size_B = 0;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic ==
+                nir_intrinsic_load_rt_out_ptr_kk)
+            size_B = MAX2(size_B, nir_intrinsic_range(
+                                     nir_instr_as_intrinsic(instr)));
+      }
+   }
+   return size_B;
+}
+
+/* Hit attributes the intersection function wrappers pass on */
+static void
+rt_emit_hit_params(struct nir_to_msl_ctx *ctx, bool triangle)
+{
+   P_IND(ctx, "uint primitive_id [[primitive_id]],\n");
+   P_IND(ctx, "uint instance_id [[instance_id]],\n");
+   P_IND(ctx, "uint user_instance_id [[user_instance_id]],\n");
+   P_IND(ctx, "uint geometry_id [[geometry_id]],\n");
+   if (triangle) {
+      P_IND(ctx, "float2 barycentric [[barycentric_coord]],\n");
+      P_IND(ctx, "bool front_facing [[front_facing]],\n");
+      P_IND(ctx, "float distance [[distance]],\n");
+   } else {
+      P_IND(ctx, "float max_distance [[max_distance]],\n");
+   }
+   P_IND(ctx, "float3 world_origin [[world_space_origin]],\n");
+   P_IND(ctx, "float3 world_direction [[world_space_direction]],\n");
+   P_IND(ctx, "float3 object_origin [[origin]],\n");
+   P_IND(ctx, "float3 object_direction [[direction]],\n");
+   P_IND(ctx, "float min_distance [[min_distance]],\n");
+   P_IND(ctx, "float4x3 object_to_world [[object_to_world_transform]],\n");
+   P_IND(ctx, "float4x3 world_to_object [[world_to_object_transform]],\n");
+   P_IND(ctx, "ray_data kk_rt_ray_data &rd [[payload]])\n");
+}
+
+static void
+rt_emit_hit_setup(struct nir_to_msl_ctx *ctx)
+{
+   P_IND(ctx, "device kk_rt_call *call = rd.frame;\n");
+   P_IND(ctx, "call->primitive_id = primitive_id;\n");
+   P_IND(ctx, "call->instance_id = instance_id;\n");
+   P_IND(ctx, "call->custom_index = user_instance_id;\n");
+   P_IND(ctx, "call->geometry_index = geometry_id;\n");
+   P_IND(ctx, "call->world_origin = world_origin;\n");
+   P_IND(ctx, "call->world_direction = world_direction;\n");
+   P_IND(ctx, "call->object_origin = object_origin;\n");
+   P_IND(ctx, "call->object_direction = object_direction;\n");
+   P_IND(ctx, "call->tmin = min_distance;\n");
+   P_IND(ctx, "call->object_to_world = object_to_world;\n");
+   P_IND(ctx, "call->world_to_object = world_to_object;\n");
+}
+
+/* Any-hit and intersection shaders are reached through the intersection
+ * function buffer, so they get a Metal intersection function that sets up the
+ * frame and calls the stage body. */
+static void
+rt_emit_intersection_wrapper(struct nir_to_msl_ctx *ctx, const char *name)
+{
+   const bool triangle = ctx->shader->info.stage == MESA_SHADER_ANY_HIT;
+
+   if (triangle) {
+      P(ctx, "[[intersection(triangle, raytracing::triangle_data, "
+             "raytracing::instancing, raytracing::world_space_data, "
+             "raytracing::intersection_function_buffer)]]\n");
+      P(ctx, "kk_rt_tri_result %s_ifb(\n", name);
+   } else {
+      P(ctx, "[[intersection(bounding_box, raytracing::instancing, "
+             "raytracing::world_space_data, "
+             "raytracing::intersection_function_buffer)]]\n");
+      P(ctx, "kk_rt_box_result %s_ifb(\n", name);
+   }
+   ctx->indentlevel++;
+   rt_emit_hit_params(ctx, triangle);
+   ctx->indentlevel--;
+   P(ctx, "{\n");
+   ctx->indentlevel++;
+   rt_emit_hit_setup(ctx);
+   if (triangle) {
+      P_IND(ctx, "call->tmax = distance;\n");
+      P_IND(ctx, "call->hit_kind = front_facing ? 0xFEu : 0xFFu;\n");
+      P_IND(ctx, "*(device float2 *)call->attribs = barycentric;\n");
+      P_IND(ctx, "call->ahit_status = %uu;\n", MSL_RT_AHIT_ACCEPT);
+      P_IND(ctx, "%s(call);\n", name);
+      P_IND(ctx, "return {call->ahit_status != %uu, call->ahit_status != %uu};\n",
+            MSL_RT_AHIT_IGNORE, MSL_RT_AHIT_TERMINATE);
+   } else {
+      /* kk_rt_report_intersection keeps the closest report below box_t */
+      P_IND(ctx, "call->tmax = max_distance;\n");
+      P_IND(ctx, "call->box_t = INFINITY;\n");
+      P_IND(ctx, "%s(call);\n", name);
+      P_IND(ctx, "bool accept = call->box_t <= max_distance;\n");
+      P_IND(ctx, "return {accept, true, call->box_t};\n");
+   }
+   ctx->indentlevel--;
+   P(ctx, "}\n");
+}
+
+static void
+rt_emit_entry_start(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
+{
+   const mesa_shader_stage stage = ctx->shader->info.stage;
+   const bool wrapped =
+      stage == MESA_SHADER_ANY_HIT || stage == MESA_SHADER_INTERSECTION;
+
+   P(ctx, "%s void %s(device kk_rt_call *call)\n",
+     wrapped ? "static" : "[[visible]]", get_entrypoint_name(ctx->shader));
+   P(ctx, "{\n");
+   ctx->indentlevel++;
+   P_IND(ctx, "constant Buffer &buf0 = *(constant Buffer *)call->root;\n");
+   P_IND(ctx, "constant SamplerTable &sampler_table = "
+              "*(constant SamplerTable *)call->sampler_table;\n");
+   P_IND(ctx, "(void)buf0;\n");
+   P_IND(ctx, "(void)sampler_table;\n");
+   /* Callee frames start after this stage's outgoing payloads */
+   P_IND(ctx, "call->stack = (ulong)call + KK_RT_FRAME_SIZE + %uu;\n",
+         rt_out_size(impl));
+}
+
 char *
 nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
 {
@@ -2554,8 +3034,13 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    if (shader->info.stage == MESA_SHADER_COMPUTE ||
        shader->info.stage == MESA_SHADER_TESS_CTRL)
       P(&ctx, "#include <metal_compute>\n");
+   const bool rt = mesa_shader_stage_is_rt(shader->info.stage);
    P(&ctx, "#include <metal_stdlib>\n");
+   if (shader->info.ray_queries || rt)
+      P(&ctx, "#include <metal_raytracing>\n");
    P(&ctx, "using namespace metal;\n");
+   if (rt)
+      P(&ctx, "%s", msl_rt_preamble);
 
    msl_emit_constant_data(&ctx, shader);
 
@@ -2563,15 +3048,19 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    if (shader->info.stage == MESA_SHADER_FRAGMENT &&
        shader->info.fs.early_fragment_tests)
       P(&ctx, "[[early_fragment_tests]]\n");
-   P(&ctx, "%s %s %s(\n", get_stage_string(shader->info.stage),
-     output_type(shader), get_entrypoint_name(shader));
-   ctx.indentlevel++;
-   emit_sysvals(&ctx, shader);
-   emit_inputs(&ctx, shader);
-   ctx.indentlevel--;
-   P(&ctx, ")\n");
-   P(&ctx, "{\n");
-   ctx.indentlevel++;
+   if (rt) {
+      rt_emit_entry_start(&ctx, impl);
+   } else {
+      P(&ctx, "%s %s %s(\n", get_stage_string(shader->info.stage),
+        output_type(shader), get_entrypoint_name(shader));
+      ctx.indentlevel++;
+      emit_sysvals(&ctx, shader);
+      emit_inputs(&ctx, shader);
+      ctx.indentlevel--;
+      P(&ctx, ")\n");
+      P(&ctx, "{\n");
+      ctx.indentlevel++;
+   }
    msl_emit_output_var(&ctx, shader);
    emit_local_vars(&ctx, shader);
    predeclare_ssa_values(&ctx, impl);
@@ -2581,6 +3070,9 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    emit_output_return(&ctx, shader);
    ctx.indentlevel--;
    P(&ctx, "}\n");
+   if (shader->info.stage == MESA_SHADER_ANY_HIT ||
+       shader->info.stage == MESA_SHADER_INTERSECTION)
+      rt_emit_intersection_wrapper(&ctx, get_entrypoint_name(shader));
    char *ret = ctx.text->buf;
    _mesa_hash_table_destroy(ctx.types, NULL);
    ralloc_steal(options->mem_ctx, ctx.text->buf);

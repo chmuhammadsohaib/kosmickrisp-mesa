@@ -45,6 +45,7 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
    kk_cmd_release_dynamic_ds_state(cmd);
    kk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    kk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
+   kk_descriptor_state_fini(cmd, &cmd->state.rt.descriptors);
 
    kk_cmd_pool_free_bo_list(pool, &cmd->uploader.bos);
 
@@ -481,9 +482,9 @@ kk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       /* We chain encoders, so an intra-encoder barrier is enough here:
        * no need to tear down and recreate the encoder.
        */
-      mtl_barrier_after_encoder_stages(cmd->metal.compute,
-                                       MTL_STAGE_DISPATCH | MTL_STAGE_BLIT,
-                                       MTL_STAGE_DISPATCH | MTL_STAGE_BLIT);
+      const enum mtl_stages stages = MTL_STAGE_DISPATCH | MTL_STAGE_BLIT |
+                                     MTL_STAGE_ACCELERATION_STRUCTURE;
+      mtl_barrier_after_encoder_stages(cmd->metal.compute, stages, stages);
    }
 }
 
@@ -570,6 +571,11 @@ kk_CmdBindDescriptorSets2KHR(
       kk_bind_descriptor_sets(&cmd->state.cs.descriptors,
                               pBindDescriptorSetsInfo);
    }
+
+   if (pBindDescriptorSetsInfo->stageFlags & KK_RT_STAGES) {
+      kk_bind_descriptor_sets(&cmd->state.rt.descriptors,
+                              pBindDescriptorSetsInfo);
+   }
 }
 
 static struct kk_push_descriptor_set *
@@ -632,6 +638,11 @@ kk_CmdPushDescriptorSet2KHR(
       kk_push_descriptor_set(cmd, &cmd->state.cs.descriptors,
                              pPushDescriptorSetInfo);
    }
+
+   if (pPushDescriptorSetInfo->stageFlags & KK_RT_STAGES) {
+      kk_push_descriptor_set(cmd, &cmd->state.rt.descriptors,
+                             pPushDescriptorSetInfo);
+   }
 }
 
 static void
@@ -654,6 +665,9 @@ kk_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
 
    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
       kk_push_constants(cmd, &cmd->state.cs.descriptors, pPushConstantsInfo);
+
+   if (pPushConstantsInfo->stageFlags & KK_RT_STAGES)
+      kk_push_constants(cmd, &cmd->state.rt.descriptors, pPushConstantsInfo);
 }
 
 void

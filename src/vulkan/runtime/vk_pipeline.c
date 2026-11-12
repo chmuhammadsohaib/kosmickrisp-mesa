@@ -868,25 +868,6 @@ static const struct vk_pipeline_cache_object_ops pipeline_precomp_shader_cache_o
    .destroy = vk_pipeline_precomp_shader_destroy,
 };
 
-struct vk_pipeline_stage {
-   mesa_shader_stage stage;
-
-   /* Whether the shader was linked with others (RT pipelines only) */
-   bool linked:1;
-   /* Whether the shader was imported from a library (Gfx pipelines only) */
-   bool imported:1;
-
-   /* Hash used to lookup the precomp */
-   blake3_hash precomp_key;
-
-   struct vk_pipeline_precomp_shader *precomp;
-
-   /* Hash used to lookup the shader */
-   blake3_hash shader_key;
-
-   struct vk_shader *shader;
-};
-
 static void
 vk_pipeline_hash_precomp_shader_stage(struct vk_device *device,
                                       VkPipelineCreateFlags2KHR pipeline_flags,
@@ -2713,31 +2694,6 @@ vk_cmd_unbind_pipelines_for_stages(struct vk_command_buffer *cmd_buffer,
    if (stages & VK_SHADER_STAGE_COMPUTE_BIT)
       vk_compute_pipeline_cmd_bind(cmd_buffer, NULL);
 }
-
-struct vk_rt_shader_group {
-   VkRayTracingShaderGroupTypeKHR type;
-
-   struct vk_pipeline_stage stages[3];
-   uint32_t stage_count;
-};
-
-struct vk_rt_pipeline {
-   struct vk_pipeline base;
-
-   struct vk_pipeline_layout *layout;
-
-   uint32_t group_count;
-   struct vk_rt_shader_group *groups;
-
-   uint32_t stage_count;
-   struct vk_pipeline_stage *stages;
-
-   VkDeviceSize stack_size;
-   VkDeviceSize scratch_size;
-   uint32_t ray_queries;
-
-   uint8_t dynamic_descriptor_offsets[MESA_VK_MAX_DESCRIPTOR_SETS];
-};
 
 uint32_t
 vk_pipeline_get_rt_scratch_size(struct vk_pipeline *pipeline)

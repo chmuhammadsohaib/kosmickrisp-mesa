@@ -3342,5 +3342,16 @@ store("clip_distance_kk", [], [BASE])
 system_value("is_depth_clamp_emulated_kk", 1, bit_sizes=[1])
 # System value indicating whether to emulate the viewport Z transform.
 system_value("is_viewport_z_transform_emulated_kk", 1, bit_sizes=[1])
+
+# KosmicKrisp ray tracing frame pointers: the incoming payload or callable
+# data, the hit attributes, and the area a stage keeps its outgoing payloads in.
+system_value("rt_payload_ptr_kk", 1, bit_sizes=[64])
+system_value("rt_attrib_ptr_kk", 1, bit_sizes=[64])
+# RANGE is the size of that area.
+system_value("rt_out_ptr_kk", 1, indices=[RANGE], bit_sizes=[64])
+# trace_ray and execute_callable once the payload is a global address, so passes
+# expecting a payload deref don't see them.
+intrinsic("trace_ray_kk", src_comp=[1, 1, 1, 1, 1, 1, 3, 1, 3, 1, 1])
+intrinsic("execute_callable_kk", src_comp=[1, 1])
 # Loads the viewport Z range for a given viewport index.
 load("viewport_z_range_kk", [1], [], [CAN_ELIMINATE, CAN_REORDER])

@@ -10,6 +10,7 @@ mtl_bridge_files = files(
 
 if host_machine.system() == 'darwin'
   mtl_bridge_files += files(
+    'mtl_acceleration_structure.m',
     'mtl_argument_table.m',
     'mtl_bridge.m',
     'mtl_buffer.m',
@@ -21,6 +22,7 @@ if host_machine.system() == 'darwin'
     'mtl_heap.m',
     'mtl_render_state.m',
     'mtl_residency_set.m',
+    'mtl_rt_pipeline.m',
     'mtl_sampler.m',
     'mtl_sync.m',
     'mtl_texture.m',
@@ -28,6 +30,7 @@ if host_machine.system() == 'darwin'
   )
 else
   mtl_bridge_files += files(
+    'stubs/mtl_acceleration_structure.c',
     'stubs/mtl_argument_table.c',
     'stubs/mtl_bridge.c',
     'stubs/mtl_buffer.c',
@@ -39,6 +42,7 @@ else
     'stubs/mtl_heap.c',
     'stubs/mtl_render_state.c',
     'stubs/mtl_residency_set.c',
+    'stubs/mtl_rt_pipeline.c',
     'stubs/mtl_sampler.c',
     'stubs/mtl_sync.c',
     'stubs/mtl_texture.c',

@@ -306,6 +306,9 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (dev->residency_set.handle == NULL)
       goto fail_compiler;
 
+   kk_device_init_as_slots(dev);
+   kk_device_init_rt(dev);
+
    if (pCreateInfo->queueCreateInfoCount > 0) {
       result =
          kk_queue_init(dev, &dev->queue, &pCreateInfo->pQueueCreateInfos[0], 0);
@@ -353,6 +356,8 @@ fail_mem_cache:
       dev->has_queue = false;
    }
 fail_vab_memory:
+   kk_device_finish_rt(dev);
+   kk_device_finish_as_slots(dev);
    mtl_release(dev->residency_set.handle);
    simple_mtx_destroy(&dev->residency_set.mutex);
 fail_compiler:
@@ -384,6 +389,9 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    kk_device_finish_lib(dev);
    kk_query_table_finish(dev, &dev->occlusion_queries);
    kk_destroy_sampler_heap(dev, &dev->samplers);
+
+   kk_device_finish_rt(dev);
+   kk_device_finish_as_slots(dev);
 
    /* Geometry heap */
    if (dev->heap)
@@ -456,6 +464,24 @@ kk_device_remove_buffer_from_residency_set(struct kk_device *dev,
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_remove_allocation(dev->residency_set.handle, buffer);
+   simple_mtx_unlock(&dev->residency_set.mutex);
+}
+
+void
+kk_device_add_acceleration_structure_to_residency_set(
+   struct kk_device *dev, mtl_acceleration_structure *as)
+{
+   simple_mtx_lock(&dev->residency_set.mutex);
+   mtl_residency_set_add_allocation(dev->residency_set.handle, as);
+   simple_mtx_unlock(&dev->residency_set.mutex);
+}
+
+void
+kk_device_remove_acceleration_structure_from_residency_set(
+   struct kk_device *dev, mtl_acceleration_structure *as)
+{
+   simple_mtx_lock(&dev->residency_set.mutex);
+   mtl_residency_set_remove_allocation(dev->residency_set.handle, as);
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 

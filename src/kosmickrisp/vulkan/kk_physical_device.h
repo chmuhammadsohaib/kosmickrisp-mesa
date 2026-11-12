@@ -51,6 +51,8 @@ struct kk_device_info {
 struct kk_env_settings {
    bool experimental_enabled;
    bool gpu_capture_enabled;
+   /* KK_RAY_TRACING=1: expose ray tracing while it is in development */
+   bool ray_tracing_enabled;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
 };

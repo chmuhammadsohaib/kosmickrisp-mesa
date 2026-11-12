@@ -190,6 +190,19 @@ struct kk_compute_state {
    struct kk_descriptor_state descriptors;
 };
 
+#define KK_RT_STAGES                                                           \
+   (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |         \
+    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |       \
+    VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR)
+
+struct kk_rt_state {
+   struct kk_descriptor_state descriptors;
+   struct vk_pipeline *pipeline;
+   /* Ray tracing stack, reused by every trace in the command buffer */
+   struct kk_ptr stack;
+   uint64_t stack_size_B;
+};
+
 struct kk_conditional_rendering_state {
    uint64_t address;
    bool inverted;
@@ -244,6 +257,7 @@ struct kk_cmd_buffer {
    struct {
       struct kk_graphics_state gfx;
       struct kk_compute_state cs;
+      struct kk_rt_state rt;
       struct kk_conditional_rendering_state cond_render;
       struct kk_shader *shaders[MESA_SHADER_STAGES];
       /* Address of the binding 0 for when compute dispatches modify it.
@@ -294,6 +308,8 @@ kk_get_descriptors_state(struct kk_cmd_buffer *cmd,
       return &cmd->state.gfx.descriptors;
    case VK_PIPELINE_BIND_POINT_COMPUTE:
       return &cmd->state.cs.descriptors;
+   case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR:
+      return &cmd->state.rt.descriptors;
    default:
       UNREACHABLE("Unhandled bind point");
    }

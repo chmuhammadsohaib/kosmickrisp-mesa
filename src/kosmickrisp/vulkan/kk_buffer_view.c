@@ -7,6 +7,8 @@
 
 #include "kk_buffer_view.h"
 
+#include "kk_acceleration_structure.h"
+
 #include "kk_buffer.h"
 #include "kk_device.h"
 #include "kk_entrypoints.h"
@@ -48,6 +50,10 @@ kk_get_buffer_format_features(struct kk_physical_device *pdev,
 
    if (kk_vbo_supports_format(p_format))
       features |= VK_FORMAT_FEATURE_2_VERTEX_BUFFER_BIT;
+
+   if (pdev->settings.ray_tracing_enabled &&
+       kk_acceleration_structure_vertex_format_supported(vk_format))
+      features |= VK_FORMAT_FEATURE_2_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR;
 
    return features;
 }
