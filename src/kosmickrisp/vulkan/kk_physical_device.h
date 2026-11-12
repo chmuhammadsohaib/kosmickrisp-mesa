@@ -12,6 +12,7 @@
 
 #include "kosmickrisp/bridge/mtl_types.h"
 
+#include "util/simple_mtx.h"
 #include "vk_physical_device.h"
 #include "vk_sync.h"
 #include "vk_sync_binary.h"
@@ -64,6 +65,10 @@ struct kk_physical_device {
    mtl_device *mtl_dev_handle;
    struct kk_device_info info;
    struct kk_env_settings settings;
+
+   /* Software fp64 library, built on first use (kk_shader.c) */
+   simple_mtx_t softfp64_mutex;
+   struct nir_shader *softfp64;
 
    struct wsi_device wsi_device;
 

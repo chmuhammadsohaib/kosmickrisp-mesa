@@ -165,14 +165,75 @@ kk_get_spirv_options(struct vk_physical_device *vk_pdev,
    };
 }
 
+#include "float64_spv.h"
+
+/* Metal has no 64-bit floats. Shaders that use them get Mesa's software fp64
+ * (float64.glsl), which works on 64-bit integers; the library is built once
+ * per physical device, the same way Turnip does it. */
+static const nir_shader *
+kk_get_softfp64(struct kk_physical_device *pdev)
+{
+   simple_mtx_lock(&pdev->softfp64_mutex);
+   if (!pdev->softfp64) {
+      /* The library touches no buffers; any valid robustness state works. */
+      struct spirv_to_nir_options spirv_options = kk_get_spirv_options(
+         &pdev->vk, MESA_SHADER_COMPUTE, &rs_all_supported);
+      spirv_options.create_library = true;
+
+      nir_shader *nir = spirv_to_nir(
+         float64_spv_source, ARRAY_SIZE(float64_spv_source), NULL,
+         MESA_SHADER_COMPUTE, "main", &spirv_options, &kk_nir_options);
+
+      NIR_PASS(_, nir, nir_lower_system_values);
+      NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
+      NIR_PASS(_, nir, nir_lower_returns);
+      NIR_PASS(_, nir, nir_inline_functions);
+      nir_remove_non_exported(nir);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
+      NIR_PASS(_, nir, nir_opt_deref);
+      nir_lower_constant_to_temp(nir);
+      NIR_PASS(_, nir, nir_lower_variable_initializers, ~0);
+      NIR_PASS(_, nir, nir_opt_find_array_copies);
+      NIR_PASS(_, nir, nir_opt_copy_prop_vars);
+      NIR_PASS(_, nir, nir_opt_dce);
+      NIR_PASS(_, nir, nir_split_var_copies);
+      NIR_PASS(_, nir, nir_lower_var_copies);
+      NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+      NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
+      NIR_PASS(_, nir, nir_opt_dce);
+      NIR_PASS(_, nir, nir_opt_cse);
+
+      pdev->softfp64 = nir;
+   }
+   simple_mtx_unlock(&pdev->softfp64_mutex);
+   return pdev->softfp64;
+}
+
 static void
-kk_preprocess_nir(UNUSED struct vk_physical_device *vk_pdev, nir_shader *nir,
+kk_preprocess_nir(struct vk_physical_device *vk_pdev, nir_shader *nir,
                   UNUSED const struct vk_pipeline_robustness_state *rs)
 {
    /* Gather info before preprocess_nir but after some general lowering, so
     * inputs_read and system_values_read are accurately set.
     */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
+   if (nir->info.bit_sizes_float & 64) {
+      struct kk_physical_device *pdev =
+         container_of(vk_pdev, struct kk_physical_device, vk);
+      /* The library has no fdiv or fsqrt; their option bits rewrite them into
+       * other double ops, which the next round turns into library calls. */
+      const nir_shader *softfp64 = kk_get_softfp64(pdev);
+      bool progress = true;
+      for (unsigned i = 0; progress && i < 4; i++) {
+         progress = false;
+         NIR_PASS(progress, nir, nir_lower_doubles, softfp64,
+                  kk_nir_options.lower_doubles_options);
+      }
+      NIR_PASS(_, nir, nir_opt_dce);
+      nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   }
 
    msl_preprocess_nir(nir);
 
