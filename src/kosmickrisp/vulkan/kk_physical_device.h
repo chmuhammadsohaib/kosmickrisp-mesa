@@ -63,6 +63,9 @@ struct kk_env_settings {
     * DLSS Frame Generation needs a second one; more than one changes how
     * games schedule work, so it's opt-in. */
    uint32_t queue_count;
+   /* KK_DEVICE_LOCAL_TYPE=0 drops the regular DEVICE_LOCAL-only memory type
+    * (on by default; see kk_physical_device.c) */
+   bool device_local_type;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
 };
@@ -83,7 +86,7 @@ struct kk_physical_device {
 
    // TODO: add mapable VRAM heap if possible
    struct kk_memory_heap mem_heaps[3];
-   VkMemoryType mem_types[3];
+   VkMemoryType mem_types[4];
    uint8_t mem_heap_count;
    uint8_t mem_type_count;
    /* Private memory backing sparse resources, which only they may use; see

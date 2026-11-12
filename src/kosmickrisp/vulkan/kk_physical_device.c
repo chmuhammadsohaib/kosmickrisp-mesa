@@ -1348,6 +1348,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    settings->nvx_enabled = debug_get_bool_option("KK_NVX", false);
    settings->queue_count =
       CLAMP(debug_get_num_option("KK_QUEUE_COUNT", 1), 1, 1 + KK_MAX_EXTRA_QUEUES);
+   settings->device_local_type =
+      debug_get_bool_option("KK_DEVICE_LOCAL_TYPE", true);
 
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";
@@ -1459,6 +1461,18 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
       pdev->settings.sparse_enabled || pdev->settings.ray_tracing_enabled;
    if (private_mem) {
       pdev->private_mem_type = pdev->mem_type_count;
+      pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
+         .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+         .heapIndex = sysmem_heap_idx,
+      };
+   }
+
+   /* A regular DEVICE_LOCAL type that isn't host visible. On unified memory
+    * it's the same shared memory as the next type, but allocators that want
+    * device memory the host can't see (AMD's FidelityFX runtime refuses
+    * host-visible types for it and fails context creation without one) find
+    * it. It sits before the host visible type, as its flags are a subset. */
+   if (pdev->settings.device_local_type) {
       pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
          .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
          .heapIndex = sysmem_heap_idx,
