@@ -139,8 +139,13 @@ struct kk_pipeline_handles {
 };
 
 struct msl_compile_data {
+   /* NULL once the shader is compiled and the source is packed */
    char *code;
    char *entrypoint_name;
+   /* Compressed source (malloc), kept only for pipeline cache serialization */
+   void *packed;
+   uint32_t packed_size;
+   uint32_t code_size;
 };
 
 struct kk_shader {

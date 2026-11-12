@@ -299,6 +299,17 @@ alu_fcmp_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr,
    ALU_BINOP(op);
 }
 
+/* Starts the statement assigning an SSA value, declaring it there when it is
+ * scoped (see predeclare_ssa_values) */
+static void
+def_assign_to_msl(struct nir_to_msl_ctx *ctx, nir_def *def)
+{
+   if (ctx->scoped_defs && BITSET_TEST(ctx->scoped_defs, def->index))
+      P_IND(ctx, "%s t%d = ", msl_type_for_def(ctx->types, def), def->index)
+   else
+      P_IND(ctx, "t%d = ", def->index)
+}
+
 static void
 alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
 {
@@ -1452,7 +1463,7 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
 
    const nir_intrinsic_info *info = &nir_intrinsic_infos[instr->intrinsic];
    if (instrinsic_needs_dest_type(instr)) {
-      P_IND(ctx, "t%d = ", instr->def.index);
+      def_assign_to_msl(ctx, &instr->def);
    }
    if (mesa_shader_stage_is_rt(ctx->shader->info.stage) &&
        rt_intrinsic_to_msl(ctx, instr))
@@ -2176,6 +2187,13 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       /* Point to NULL, not really used currently */
       P(ctx, "0x0;\n");
       break;
+   case nir_intrinsic_shader_clock:
+      /* Metal has no shader clock. Games read it unasked (DOOM: The Dark Ages
+       * picks atomic slots from its low bits), so return a per-invocation
+       * counter that advances on every read: monotonic, as the spec wants,
+       * and elapsed-time loops still end. */
+      P(ctx, "as_type<uint2>(kk_clock += 1024ul);\n");
+      break;
    default:
       P_IND(ctx, "Unknown intrinsic %s\n", info->name);
    }
@@ -2205,7 +2223,7 @@ tex_to_msl(struct nir_to_msl_ctx *ctx, nir_tex_instr *tex)
    // Projectors have to be lowered away to regular arithmetic
    assert(!nir_tex_get_src(tex, nir_tex_src_projector));
 
-   P_IND(ctx, "t%d = ", tex->def.index);
+   def_assign_to_msl(ctx, &tex->def);
 
    switch (tex->op) {
    case nir_texop_tex:
@@ -2481,10 +2499,16 @@ instr_to_msl(struct nir_to_msl_ctx *ctx, nir_instr *instr)
       nir_alu_instr *alu = nir_instr_as_alu(instr);
       const char *math_mode = alu_fp_math_mode_pragma(ctx, alu);
       if (math_mode) {
+         /* The pragma needs its own block, so declare scoped values outside */
+         if (ctx->scoped_defs && BITSET_TEST(ctx->scoped_defs, alu->def.index))
+            P_IND(ctx, "%s t%d;\n", msl_type_for_def(ctx->types, &alu->def),
+                  alu->def.index);
          P_IND(ctx, "{\n");
          P_IND(ctx, "#pragma METAL fp math_mode(%s)\n", math_mode);
+         P_IND(ctx, "t%d = ", alu->def.index);
+      } else {
+         def_assign_to_msl(ctx, &alu->def);
       }
-      P_IND(ctx, "t%d = ", alu->def.index);
       alu_to_msl(ctx, alu);
       P(ctx, ";\n");
       if (math_mode)
@@ -2823,9 +2847,83 @@ msl_gather_info(struct nir_to_msl_ctx *ctx, struct nir_to_msl_options *options)
    }
 }
 
+/* Block index range of the structured list holding block, which is what its
+ * values' MSL scope covers */
+static void
+block_scope_range(nir_block *block, unsigned *first, unsigned *last)
+{
+   nir_cf_node *parent = block->cf_node.parent;
+   switch (parent->type) {
+   case nir_cf_node_loop: {
+      nir_loop *loop = nir_cf_node_as_loop(parent);
+      *first = nir_loop_first_block(loop)->index;
+      *last = nir_loop_last_block(loop)->index;
+      break;
+   }
+   case nir_cf_node_if: {
+      nir_if *nif = nir_cf_node_as_if(parent);
+      unsigned then_last = nir_if_last_then_block(nif)->index;
+      if (block->index <= then_last) {
+         *first = nir_if_first_then_block(nif)->index;
+         *last = then_last;
+      } else {
+         *first = nir_if_first_else_block(nif)->index;
+         *last = nir_if_last_else_block(nif)->index;
+      }
+      break;
+   }
+   default:
+      *first = 0;
+      *last = UINT_MAX;
+      break;
+   }
+}
+
+/* Whether every use of def is inside the MSL scope it's defined in */
+static bool
+def_uses_in_scope(nir_def *def)
+{
+   unsigned first, last;
+   block_scope_range(nir_def_block(def), &first, &last);
+   nir_foreach_use_including_if(src, def) {
+      unsigned index;
+      if (nir_src_is_if(src)) {
+         nir_cf_node *prev = nir_cf_node_prev(&nir_src_use_if(src)->cf_node);
+         index = nir_cf_node_as_block(prev)->index;
+      } else {
+         index = nir_src_use_instr(src)->block->index;
+      }
+      if (index < first || index > last)
+         return false;
+   }
+   return true;
+}
+
+/* Declares SSA values at function scope, except those only used inside the
+ * structured scope that defines them, which are declared where they're defined.
+ * Apple's compiler mishandles subgroup operations inside loops when their
+ * results live in variables declared outside the loop: a ballot in the block
+ * that breaks out of a scalarization loop then sees every lane (idTech 8's tiled
+ * compute passes). */
 static void
 predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
 {
+   bool reads_clock = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_shader_clock)
+            reads_clock = true;
+      }
+   }
+   if (reads_clock)
+      P_IND(ctx, "ulong kk_clock = 0ul;\n");
+
+   if (!mesa_shader_stage_is_rt(ctx->shader->info.stage)) {
+      nir_metadata_require(impl, nir_metadata_block_index);
+      ctx->scoped_defs = rzalloc_array(ctx->text, BITSET_WORD,
+                                       BITSET_WORDS(impl->ssa_alloc));
+   }
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          nir_def *def;
@@ -2848,6 +2946,27 @@ predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
             break;
          }
          default:
+            continue;
+         }
+         /* Barycentric loads aren't emitted (see intrinsic_to_msl) */
+         bool emitted = true;
+         if (instr->type == nir_instr_type_intrinsic) {
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_load_barycentric_pixel:
+            case nir_intrinsic_load_barycentric_centroid:
+            case nir_intrinsic_load_barycentric_sample:
+            case nir_intrinsic_load_barycentric_at_sample:
+            case nir_intrinsic_load_barycentric_at_offset:
+               emitted = false;
+               break;
+            default:
+               break;
+            }
+         }
+         if (ctx->scoped_defs && emitted && !msl_def_is_texture(ctx, def) &&
+             !msl_def_is_sampler(ctx, def) &&
+             msl_type_for_def(ctx->types, def) && def_uses_in_scope(def)) {
+            BITSET_SET(ctx->scoped_defs, def->index);
             continue;
          }
          if (msl_def_is_texture(ctx, def)) {

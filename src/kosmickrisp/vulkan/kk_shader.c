@@ -20,6 +20,7 @@
 #include "kosmickrisp/bridge/ns_process_info.h"
 #include "kosmickrisp/bridge/vk_to_mtl_map.h"
 #include "kosmickrisp/compiler/msl_rt.h"
+#include "util/compress.h"
 #include "util/string_buffer.h"
 #include "kosmickrisp/compiler/nir_to_msl.h"
 
@@ -1027,12 +1028,14 @@ kk_shader_destroy(struct vk_device *vk_dev, struct kk_shader *shader,
          struct msl_compile_data *data = &shader->msl_data[i];
          ralloc_free((void *)data->entrypoint_name);
          ralloc_free((void *)data->code);
+         free(data->packed);
       }
    }
 
    struct msl_compile_data *data = &shader->msl_data[shader->info.stage];
    ralloc_free((void *)data->entrypoint_name);
    ralloc_free((void *)data->code);
+   free(data->packed);
 
    vk_shader_free(&dev->vk, pAllocator, &shader->vk);
 }
@@ -1785,6 +1788,68 @@ destroy_vertex:
    return result;
 }
 
+/* MSL is only needed again to serialize the shader into a pipeline cache, so
+ * once Metal has compiled it, it's kept compressed. Games keep tens of
+ * thousands of pipelines, and the plain source was about half of each one's
+ * memory (twice for graphics, whose vertex shader holds every stage). */
+static void
+kk_msl_pack(struct msl_compile_data *data)
+{
+#ifdef HAVE_COMPRESSION
+   if (data->code == NULL)
+      return;
+   const size_t size = strlen(data->code) + 1u;
+   const size_t max_size = util_compress_max_compressed_len(size);
+   uint8_t *packed = malloc(max_size);
+   if (packed == NULL)
+      return;
+   const size_t packed_size =
+      util_compress_deflate((const uint8_t *)data->code, size, packed, max_size);
+   if (packed_size == 0u) {
+      free(packed);
+      return;
+   }
+   void *shrunk = realloc(packed, packed_size);
+   data->packed = shrunk ? shrunk : packed;
+   data->packed_size = packed_size;
+   data->code_size = size;
+   ralloc_free(data->code);
+   data->code = NULL;
+#endif
+}
+
+static void
+kk_shader_pack_msl(struct kk_shader *shader)
+{
+   kk_msl_pack(&shader->msl_data[shader->info.stage]);
+   if (shader->info.stage == MESA_SHADER_VERTEX) {
+      u_foreach_bit(stage, shader->info.vs.additional_stages_bits)
+         kk_msl_pack(&shader->msl_data[stage]);
+   }
+}
+
+/* The shader's MSL, unpacked into a malloc'd copy in *unpacked if needed */
+static const char *
+kk_msl_code(const struct msl_compile_data *data, char **unpacked)
+{
+   *unpacked = NULL;
+   if (data->code != NULL)
+      return data->code;
+#ifdef HAVE_COMPRESSION
+   char *code = malloc(data->code_size);
+   if (code == NULL ||
+       !util_compress_inflate(data->packed, data->packed_size,
+                              (uint8_t *)code, data->code_size)) {
+      free(code);
+      return NULL;
+   }
+   *unpacked = code;
+   return code;
+#else
+   return NULL;
+#endif
+}
+
 static VkResult
 kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
@@ -1909,6 +1974,8 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
       /* Memset the output array */
       memset(shaders_out, 0, shader_count * sizeof(*shaders_out));
    } else {
+      for (uint32_t i = 0; i < shader_count; i++)
+         kk_shader_pack_msl(shaders[i]);
       memcpy(shaders_out, shaders, shader_count * sizeof(*shaders_out));
    }
 
@@ -1920,12 +1987,19 @@ kk_msl_serialize(struct kk_shader *shader, mesa_shader_stage stage,
                  struct blob *blob)
 {
    struct msl_compile_data *data = &shader->msl_data[stage];
+   char *unpacked;
+   const char *code = kk_msl_code(data, &unpacked);
+   if (code == NULL) {
+      blob->out_of_memory = true;
+      return;
+   }
    uint32_t entrypoint_length = strlen(data->entrypoint_name) + 1;
-   uint32_t code_length = strlen(data->code) + 1;
+   uint32_t code_length = strlen(code) + 1;
    blob_write_uint32(blob, entrypoint_length);
    blob_write_uint32(blob, code_length);
    blob_write_bytes(blob, data->entrypoint_name, entrypoint_length);
-   blob_write_bytes(blob, data->code, code_length);
+   blob_write_bytes(blob, code, code_length);
+   free(unpacked);
 }
 
 static bool
@@ -2017,6 +2091,7 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
    if (result != VK_SUCCESS)
       goto fail;
 
+   kk_shader_pack_msl(shader);
    *shader_out = &shader->vk;
 
    return VK_SUCCESS;
