@@ -122,6 +122,9 @@ struct kk_device {
       struct hash_table *links; /* struct vk_pipeline * -> kk_rt_link */
    } rt;
 
+   /* Sparse memory, for unmapping pages; see kk_sparse.c */
+   struct kk_bo *sparse_unmap_bo;
+
    /* Geomtry heap */
    struct kk_bo *heap;
    util_once_flag heap_init_once;

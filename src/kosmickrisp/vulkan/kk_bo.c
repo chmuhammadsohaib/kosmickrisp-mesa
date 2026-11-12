@@ -78,6 +78,29 @@ fail_heap:
    return result;
 }
 
+VkResult
+kk_alloc_sparse_bo(struct kk_device *dev, struct vk_object_base *log_obj,
+                   uint64_t size_B, struct kk_bo **bo_out)
+{
+   size_B = align64(size_B, MTL_SPARSE_PAGE_SIZE_B);
+   mtl_heap *handle = mtl_new_sparse_backing_heap(dev->mtl_handle, size_B);
+   if (handle == NULL)
+      return vk_errorf(log_obj, VK_ERROR_OUT_OF_DEVICE_MEMORY, "%m");
+
+   struct kk_bo *bo = CALLOC_STRUCT(kk_bo);
+   if (bo == NULL) {
+      mtl_release(handle);
+      return vk_errorf(log_obj, VK_ERROR_OUT_OF_HOST_MEMORY, "%m");
+   }
+
+   bo->mtl_handle = handle;
+   bo->size_B = size_B;
+   kk_device_add_heap_to_residency_set(dev, handle);
+
+   *bo_out = bo;
+   return VK_SUCCESS;
+}
+
 void
 kk_destroy_bo(struct kk_device *dev, struct kk_bo *bo)
 {

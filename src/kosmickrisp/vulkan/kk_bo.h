@@ -36,6 +36,11 @@ struct kk_ptr {
 
 VkResult kk_alloc_bo(struct kk_device *dev, struct vk_object_base *log_obj,
                      uint64_t size_B, uint64_t align_B, struct kk_bo **bo_out);
+/* Private memory for sparse resources to map pages of. It has neither a CPU
+ * mapping nor a GPU address of its own. */
+VkResult kk_alloc_sparse_bo(struct kk_device *dev,
+                            struct vk_object_base *log_obj, uint64_t size_B,
+                            struct kk_bo **bo_out);
 
 void kk_destroy_bo(struct kk_device *dev, struct kk_bo *bo);
 

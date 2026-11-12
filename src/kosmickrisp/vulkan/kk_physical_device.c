@@ -365,6 +365,11 @@ kk_get_device_features(
       .uniformAndStorageBuffer8BitAccess = true,
       .uniformBufferStandardLayout = true,
 
+      /* Sparse memory: buffers and 2D images (kk_sparse.c) */
+      .sparseBinding = pdev->settings.sparse_enabled,
+      .sparseResidencyBuffer = pdev->settings.sparse_enabled,
+      .sparseResidencyImage2D = pdev->settings.sparse_enabled,
+
       /* VK_KHR_acceleration_structure */
       .accelerationStructure = supported_extensions->KHR_acceleration_structure,
       .accelerationStructureCaptureReplay = false,
@@ -1184,6 +1189,7 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
    settings->ray_tracing_enabled =
       debug_get_bool_option("KK_RAY_TRACING", false);
+   settings->sparse_enabled = debug_get_bool_option("KK_SPARSE", false);
 
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";
@@ -1292,12 +1298,23 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
       .heapIndex = sysmem_heap_idx,
    };
 
+   /* Metal's placement sparse resources need private memory, which isn't host
+    * visible. Only sparse resources list this type. */
+   pdev->sparse_mem_type = pdev->mem_type_count;
+   if (pdev->settings.sparse_enabled) {
+      pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
+         .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+         .heapIndex = sysmem_heap_idx,
+      };
+   }
+
    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
 
    pdev->queue_families[pdev->queue_family_count++] = (struct kk_queue_family){
       .queue_flags =
-         VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+         VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT |
+         (pdev->settings.sparse_enabled ? VK_QUEUE_SPARSE_BINDING_BIT : 0),
       .queue_count = 1,
    };
    assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));

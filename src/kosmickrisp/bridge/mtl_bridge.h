@@ -35,6 +35,7 @@
 #include "mtl_residency_set.h"
 #include "mtl_rt_pipeline.h"
 #include "mtl_sampler.h"
+#include "mtl_sparse.h"
 #include "mtl_sync.h"
 #include "mtl_texture.h"
 

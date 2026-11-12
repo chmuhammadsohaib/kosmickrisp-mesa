@@ -6,6 +6,8 @@
  */
 
 #include "kk_queue.h"
+
+#include "kk_sparse.h"
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
 #include "kk_device.h"
@@ -193,6 +195,11 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
     * work. All resources should have been allocated before submission.
     * Otherwise, users are playing with fire. */
    kk_device_make_resources_resident(dev);
+
+   /* Sparse binds come after the waits and before the work, in queue order;
+    * Metal applies the mapping updates in its queue's order too. */
+   if (vk_queue_submit_has_bind(submit))
+      kk_queue_bind_sparse(queue, submit);
 
    for (uint32_t i = 0; i < submit->command_buffer_count; ++i) {
       struct kk_cmd_buffer *cmd_buffer =

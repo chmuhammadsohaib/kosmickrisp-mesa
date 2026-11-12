@@ -42,8 +42,25 @@ struct kk_image_plane {
    uint64_t addr;
 };
 
+/* See kk_sparse.c */
+struct kk_image_sparse {
+   /* Texels per tile */
+   struct mtl_size tile;
+   /* Tiles of each level before the mip tail */
+   struct mtl_size level_tiles[16];
+   /* Levels from this one on are in the mip tail */
+   uint32_t first_tail_level;
+   /* Opaque pages per array layer, and of its mip tail */
+   uint32_t layer_pages;
+   uint32_t tail_pages;
+};
+
 struct kk_image {
    struct vk_image vk;
+
+   /* A Metal placement sparse texture, bound with vkQueueBindSparse */
+   bool sparse;
+   struct kk_image_sparse sparse_info;
 
    /** True if the planes are bound separately
     * * This is set based on VK_IMAGE_CREATE_DISJOINT_BIT

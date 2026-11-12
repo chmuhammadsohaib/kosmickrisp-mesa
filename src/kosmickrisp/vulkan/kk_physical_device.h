@@ -53,6 +53,8 @@ struct kk_env_settings {
    bool gpu_capture_enabled;
    /* KK_RAY_TRACING=1: expose ray tracing while it is in development */
    bool ray_tracing_enabled;
+   /* KK_SPARSE=1: expose sparse memory while it is in development */
+   bool sparse_enabled;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
 };
@@ -72,6 +74,9 @@ struct kk_physical_device {
    VkMemoryType mem_types[3];
    uint8_t mem_heap_count;
    uint8_t mem_type_count;
+   /* Private memory backing sparse resources, which only they may use; see
+    * kk_sparse.c. mem_type_count when there is none. */
+   uint8_t sparse_mem_type;
 
    // Emulated binary sync type
    struct vk_sync_binary_type sync_binary_type;
@@ -95,6 +100,14 @@ static inline struct kk_instance *
 kk_physical_device_instance(struct kk_physical_device *pdev)
 {
    return (struct kk_instance *)pdev->vk.instance;
+}
+
+/* Memory types for everything but sparse resources */
+static inline uint32_t
+kk_regular_mem_types(const struct kk_physical_device *pdev)
+{
+   return BITFIELD_MASK(pdev->mem_type_count) &
+          ~BITFIELD_BIT(pdev->sparse_mem_type);
 }
 
 VkResult kk_enumerate_physical_devices(struct vk_instance *_instance);

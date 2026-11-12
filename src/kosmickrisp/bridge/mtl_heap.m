@@ -5,6 +5,7 @@
  */
 
 #include "mtl_heap.h"
+#include "mtl_sparse.h"
 
 /* TODO_KOSMICKRISP Remove */
 #include "kk_private.h"
@@ -97,5 +98,33 @@ mtl_resource_set_label(mtl_resource *resource, const char *label)
    @autoreleasepool {
       id<MTLResource> res = (id<MTLResource>)resource;
       res.label = @(label);
+   }
+}
+
+/* Placement sparse textures, see mtl_sparse.h */
+mtl_texture *
+mtl_new_placement_sparse_texture(mtl_device *device,
+                                 const struct kk_image_layout *layout)
+{
+   @autoreleasepool {
+      id<MTLDevice> dev = (id<MTLDevice>)device;
+      MTLTextureDescriptor *descriptor = [mtl_new_texture_descriptor(layout) autorelease];
+      descriptor.storageMode = MTLStorageModePrivate;
+      descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+      descriptor.placementSparsePageSize = MTLSparsePageSize16;
+      return [dev newTextureWithDescriptor:descriptor];
+   }
+}
+
+struct mtl_size
+mtl_placement_sparse_tile_size(mtl_device *device, const struct kk_image_layout *layout)
+{
+   @autoreleasepool {
+      id<MTLDevice> dev = (id<MTLDevice>)device;
+      MTLSize size = [dev sparseTileSizeWithTextureType:(MTLTextureType)layout->type
+                                            pixelFormat:layout->format.mtl
+                                            sampleCount:layout->sample_count_sa
+                                         sparsePageSize:MTLSparsePageSize16];
+      return (struct mtl_size){size.width, size.height, size.depth};
    }
 }

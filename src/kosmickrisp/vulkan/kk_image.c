@@ -7,6 +7,8 @@
 
 #include "kk_image.h"
 
+#include "kk_sparse.h"
+
 #include "kk_device.h"
 #include "kk_device_memory.h"
 #include "kk_entrypoints.h"
@@ -285,8 +287,10 @@ kk_GetPhysicalDeviceImageFormatProperties2(
    if (ycbcr_info && pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* Don't support sparse residency */
-   if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+   /* Sparse images are 2D color images (kk_sparse.c) */
+   if ((pImageFormatInfo->flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                                   VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)) &&
+       !kk_sparse_image_create_supported(pdev, pImageFormatInfo))
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    /* From the Vulkan 1.3.279 spec:
@@ -518,8 +522,9 @@ kk_GetPhysicalDeviceSparseImageFormatProperties2(
    const VkPhysicalDeviceSparseImageFormatInfo2 *pFormatInfo,
    uint32_t *pPropertyCount, VkSparseImageFormatProperties2 *pProperties)
 {
-   *pPropertyCount = 0;
-   return;
+   VK_FROM_HANDLE(kk_physical_device, pdev, physicalDevice);
+   kk_sparse_image_format_properties(pdev, pFormatInfo, pPropertyCount,
+                                     pProperties);
 }
 
 static VkResult
@@ -565,6 +570,9 @@ kk_image_init(struct kk_device *dev, struct kk_image *image,
                            &image->planes[plane].layout);
    }
 
+   if (pCreateInfo->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT)
+      return kk_image_init_sparse(dev, image);
+
    return VK_SUCCESS;
 }
 
@@ -592,6 +600,8 @@ static void
 kk_image_finish(struct kk_device *dev, struct kk_image *image,
                 const VkAllocationCallbacks *pAllocator)
 {
+   kk_image_finish_sparse(dev, image);
+
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
       kk_image_plane_finish(dev, &image->planes[plane], image->vk.create_flags,
                             pAllocator);
@@ -664,7 +674,16 @@ kk_get_image_memory_requirements(struct kk_device *dev, struct kk_image *image,
                                  VkMemoryRequirements2 *pMemoryRequirements)
 {
    struct kk_physical_device *pdev = kk_device_physical(dev);
-   uint32_t memory_types = (1 << pdev->mem_type_count) - 1;
+   uint32_t memory_types = kk_regular_mem_types(pdev);
+
+   if (image->sparse) {
+      pMemoryRequirements->memoryRequirements = (VkMemoryRequirements){
+         .size = kk_image_sparse_size_B(image),
+         .alignment = MTL_SPARSE_PAGE_SIZE_B,
+         .memoryTypeBits = BITFIELD_BIT(pdev->sparse_mem_type),
+      };
+      return;
+   }
 
    /* Remove non host visible heaps from the types for host image copy in case
     * of potential issues. This should be removed when we get ReBAR.
@@ -755,7 +774,18 @@ kk_GetImageSparseMemoryRequirements2(
    uint32_t *pSparseMemoryRequirementCount,
    VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
-   *pSparseMemoryRequirementCount = 0u;
+   VK_FROM_HANDLE(kk_image, image, pInfo->image);
+
+   if (!image->sparse ||
+       !(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)) {
+      *pSparseMemoryRequirementCount = 0u;
+      return;
+   }
+
+   if (pSparseMemoryRequirements && *pSparseMemoryRequirementCount)
+      kk_image_sparse_memory_requirements(
+         image, &pSparseMemoryRequirements[0].memoryRequirements);
+   *pSparseMemoryRequirementCount = 1u;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -764,7 +794,23 @@ kk_GetDeviceImageSparseMemoryRequirements(
    uint32_t *pSparseMemoryRequirementCount,
    VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
-   *pSparseMemoryRequirementCount = 0u;
+   VK_FROM_HANDLE(kk_device, dev, device);
+   struct kk_image image = {0};
+
+   if (kk_image_init(dev, &image, pInfo->pCreateInfo) != VK_SUCCESS) {
+      *pSparseMemoryRequirementCount = 0u;
+      return;
+   }
+
+   VkImageSparseMemoryRequirementsInfo2 info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_SPARSE_MEMORY_REQUIREMENTS_INFO_2,
+      .image = kk_image_to_handle(&image),
+   };
+   kk_GetImageSparseMemoryRequirements2(device, &info,
+                                        pSparseMemoryRequirementCount,
+                                        pSparseMemoryRequirements);
+
+   kk_image_finish(dev, &image, NULL);
 }
 
 static void
