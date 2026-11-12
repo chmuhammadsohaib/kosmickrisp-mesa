@@ -206,7 +206,26 @@ static const VkFormat available_surface_formats[] = {
    VK_FORMAT_R16G16B16A16_SFLOAT,
    VK_FORMAT_A2R10G10B10_UNORM_PACK32,
    VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+   /* CAMetalLayer has no RGBA8 format: these present through a BGRA8 layer,
+    * the blit to the drawable swizzling. Some games require RGBA8 (DOOM: The
+    * Dark Ages does with FSR frame generation on). */
+   VK_FORMAT_R8G8B8A8_UNORM,
+   VK_FORMAT_R8G8B8A8_SRGB,
 };
+
+/* The format of the drawable an image of the swapchain format is blitted to */
+static VkFormat
+wsi_metal_drawable_format(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_R8G8B8A8_UNORM:
+      return VK_FORMAT_B8G8R8A8_UNORM;
+   case VK_FORMAT_R8G8B8A8_SRGB:
+      return VK_FORMAT_B8G8R8A8_SRGB;
+   default:
+      return format;
+   }
+}
 
 static const VkColorSpaceKHR available_surface_color_spaces[] = {
    VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
@@ -826,9 +845,15 @@ wsi_metal_create_image(const struct wsi_metal_swapchain *metal_chain,
    if (wsi->sw || result != VK_SUCCESS)
       return result;
 
-   /* We perform blit through rendering */
+   /* We perform blit through rendering, into the drawable's format */
    VkImageCreateInfo blit_create = chain->image_info.create;
    blit_create.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+   const VkFormat drawable_format = wsi_metal_drawable_format(blit_create.format);
+   if (drawable_format != blit_create.format) {
+      blit_create.format = drawable_format;
+      blit_create.flags &= ~VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+      blit_create.pNext = NULL;
+   }
 
    result = wsi->CreateImage(chain->device, &blit_create,
                              &chain->alloc, &image->blit.image);
@@ -904,7 +929,8 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
 
    VkResult result = wsi_metal_layer_configure(metal_surface->pLayer,
       pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height,
-      num_images, pCreateInfo->imageFormat, pCreateInfo->imageColorSpace,
+      num_images, wsi_metal_drawable_format(pCreateInfo->imageFormat),
+      pCreateInfo->imageColorSpace,
       layer_opaque, immediate_mode, framebuffer_only);
    if (result != VK_SUCCESS)
       return result;
