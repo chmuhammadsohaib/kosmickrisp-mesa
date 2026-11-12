@@ -359,6 +359,7 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    kk_device_init_as_slots(dev);
    kk_device_init_as_pool(dev);
    kk_device_init_rt(dev);
+   kk_mfx_init(dev);
 
    if (pdev->settings.sparse_enabled) {
       result = kk_alloc_private_bo(dev, &dev->vk.base, MTL_SPARSE_PAGE_SIZE_B,
@@ -416,6 +417,7 @@ fail_mem_cache:
 fail_vab_memory:
    if (dev->sparse_unmap_bo)
       kk_destroy_bo(dev, dev->sparse_unmap_bo);
+   kk_mfx_finish(dev);
    kk_device_finish_rt(dev);
    kk_device_finish_rt_stacks(dev);
    kk_device_finish_as_pool(dev);
@@ -471,6 +473,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    /* After the queue, whose command buffers return their stacks */
    kk_device_finish_rt_stacks(dev);
+   kk_mfx_finish(dev);
    kk_rt_stats_finish(dev);
 
    /* Release the residency set last once all BOs are released. */

@@ -10,6 +10,7 @@
 
 #include "kk_private.h"
 
+#include "kk_mfx.h"
 #include "kk_query_table.h"
 #include "kk_queue.h"
 
@@ -142,6 +143,9 @@ struct kk_device {
       simple_mtx_t mutex;
       struct util_dynarray free; /* struct kk_bo * */
    } rt_stacks;
+
+   /* MetalFX upscaling for the NVX channel; see kk_mfx.c */
+   struct kk_mfx_state mfx;
 
    /* KK_RT_STATS, NULL when off; see kk_rt_stats.c */
    struct kk_rt_stats *rt_stats;

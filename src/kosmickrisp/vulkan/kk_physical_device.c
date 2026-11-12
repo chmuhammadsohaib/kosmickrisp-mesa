@@ -387,6 +387,10 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_ray_tracing_pipeline = pdev->settings.ray_tracing_enabled,
       .KHR_pipeline_library = pdev->settings.ray_tracing_enabled,
       .EXT_pipeline_library_group_handles = pdev->settings.ray_tracing_enabled,
+
+      /* kosmickrisp-metalfx: in development, off unless KK_NVX=1 */
+      .NVX_binary_import = pdev->settings.nvx_enabled,
+      .NVX_image_view_handle = pdev->settings.nvx_enabled,
    };
 }
 
@@ -1185,6 +1189,15 @@ kk_get_device_properties(
    STATIC_ASSERT(sizeof(instance->driver_build_sha) >= VK_UUID_SIZE);
    memcpy(properties->driverUUID, instance->driver_build_sha, VK_UUID_SIZE);
 
+   /* kosmickrisp-metalfx: NGX finds its adapter through the device LUID and
+    * gives up without one. The Metal registry ID is unique per GPU. */
+   if (pdev->settings.nvx_enabled) {
+      STATIC_ASSERT(sizeof(dev_uuid.registry_id) == VK_LUID_SIZE);
+      memcpy(properties->deviceLUID, &dev_uuid.registry_id, VK_LUID_SIZE);
+      properties->deviceLUIDValid = true;
+      properties->deviceNodeMask = 1;
+   }
+
    snprintf(properties->driverName, VK_MAX_DRIVER_NAME_SIZE, "KosmicKrisp");
    snprintf(properties->driverInfo, VK_MAX_DRIVER_INFO_SIZE,
             "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
@@ -1332,6 +1345,7 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    settings->ray_tracing_enabled =
       debug_get_bool_option("KK_RAY_TRACING", false);
    settings->sparse_enabled = debug_get_bool_option("KK_SPARSE", false);
+   settings->nvx_enabled = debug_get_bool_option("KK_NVX", false);
 
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";

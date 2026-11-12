@@ -56,6 +56,9 @@ struct kk_env_settings {
    bool ray_tracing_enabled;
    /* KK_SPARSE=1: expose sparse memory while it is in development */
    bool sparse_enabled;
+   /* KK_NVX=1: expose VK_NVX_binary_import and VK_NVX_image_view_handle for
+    * the MetalFX upscaling work (logging stubs for now) */
+   bool nvx_enabled;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
 };

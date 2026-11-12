@@ -6,6 +6,7 @@ mtl_bridge_files = files(
   'vk_to_mtl_map.h',
   'vk_to_mtl_map.c',
   'mtl_format.h',
+  'mtl_fx.h',
 )
 
 if host_machine.system() == 'darwin'
@@ -19,6 +20,7 @@ if host_machine.system() == 'darwin'
     'mtl_compiler.m',
     'mtl_device.m',
     'mtl_encoder.m',
+    'mtl_fx.m',
     'mtl_heap.m',
     'mtl_render_state.m',
     'mtl_residency_set.m',
@@ -40,6 +42,7 @@ else
     'stubs/mtl_compiler.c',
     'stubs/mtl_device.c',
     'stubs/mtl_encoder.c',
+    'stubs/mtl_fx.c',
     'stubs/mtl_heap.c',
     'stubs/mtl_render_state.c',
     'stubs/mtl_residency_set.c',
@@ -60,7 +63,7 @@ mtl_bridge_dependencies = [
 if host_machine.system() == 'darwin'
   mtl_bridge_dependencies += dependency(
     'appleframeworks',
-    modules : ['Foundation']
+    modules : ['Foundation', 'MetalFX']
   )
 endif
 
@@ -76,4 +79,5 @@ libmtl_bridge = static_library(
 
 idep_mtl_bridge = declare_dependency(
   link_with : libmtl_bridge,
+  dependencies : mtl_bridge_dependencies,
 )
