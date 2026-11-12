@@ -55,6 +55,12 @@ struct kk_addr_range {
 };
 
 /* Queues beyond the first in the queue family (KK_QUEUE_COUNT) */
-#define KK_MAX_EXTRA_QUEUES 3
+/* Queues besides the first: up to 3 more in the main family (KK_QUEUE_COUNT)
+ * and up to 4 in each of up to 2 compute families (KK_COMPUTE_QUEUES) */
+#define KK_MAX_MAIN_QUEUES 4
+#define KK_MAX_COMPUTE_FAMILIES 2
+#define KK_MAX_COMPUTE_QUEUES 4
+#define KK_MAX_EXTRA_QUEUES \
+   (KK_MAX_MAIN_QUEUES - 1 + KK_MAX_COMPUTE_FAMILIES * KK_MAX_COMPUTE_QUEUES)
 
 #endif

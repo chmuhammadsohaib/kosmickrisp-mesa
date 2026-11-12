@@ -63,6 +63,12 @@ struct kk_env_settings {
     * DLSS Frame Generation needs a second one; more than one changes how
     * games schedule work, so it's opt-in. */
    uint32_t queue_count;
+   /* KK_COMPUTE_QUEUES=n[,m] (each 1 to 4): queue families after the main
+    * one, compute and transfer only, with n (and m) queues. Engines look for
+    * a separate family for async compute; DOOM: The Dark Ages also wants one
+    * it doesn't use itself before it offers FSR frame generation (2,1). Off
+    * by default, like KK_QUEUE_COUNT. */
+   uint32_t compute_queue_counts[KK_MAX_COMPUTE_FAMILIES];
    /* KK_DEVICE_LOCAL_TYPE=0 drops the regular DEVICE_LOCAL-only memory type
     * (on by default; see kk_physical_device.c) */
    bool device_local_type;

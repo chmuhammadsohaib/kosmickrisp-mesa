@@ -383,17 +383,26 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
          goto fail_vab_memory;
    }
 
-   if (pCreateInfo->queueCreateInfoCount > 0) {
-      const VkDeviceQueueCreateInfo *queue_info = &pCreateInfo->pQueueCreateInfos[0];
-      result = kk_queue_init(dev, &dev->queue, queue_info, 0);
-      if (result != VK_SUCCESS)
-         goto fail_vab_memory;
-      dev->has_queue = true;
-      for (uint32_t i = 1; i < queue_info->queueCount && i <= KK_MAX_EXTRA_QUEUES; i++) {
-         result = kk_queue_init(dev, &dev->extra_queues[i - 1], queue_info, i);
+   /* The first queue of the first family is dev->queue; every other queue,
+    * of either family (KK_QUEUE_COUNT, KK_COMPUTE_QUEUES), is an extra queue */
+   for (uint32_t f = 0; f < pCreateInfo->queueCreateInfoCount; f++) {
+      const VkDeviceQueueCreateInfo *queue_info = &pCreateInfo->pQueueCreateInfos[f];
+      for (uint32_t i = 0; i < queue_info->queueCount; i++) {
+         struct kk_queue *queue;
+         if (!dev->has_queue) {
+            queue = &dev->queue;
+         } else if (dev->extra_queue_count < KK_MAX_EXTRA_QUEUES) {
+            queue = &dev->extra_queues[dev->extra_queue_count];
+         } else {
+            break;
+         }
+         result = kk_queue_init(dev, queue, queue_info, i);
          if (result != VK_SUCCESS)
             goto fail_queues;
-         dev->extra_queue_count = i;
+         if (queue == &dev->queue)
+            dev->has_queue = true;
+         else
+            dev->extra_queue_count++;
       }
    }
 

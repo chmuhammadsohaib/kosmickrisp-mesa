@@ -1347,7 +1347,14 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    settings->sparse_enabled = debug_get_bool_option("KK_SPARSE", false);
    settings->nvx_enabled = debug_get_bool_option("KK_NVX", false);
    settings->queue_count =
-      CLAMP(debug_get_num_option("KK_QUEUE_COUNT", 1), 1, 1 + KK_MAX_EXTRA_QUEUES);
+      CLAMP(debug_get_num_option("KK_QUEUE_COUNT", 1), 1, KK_MAX_MAIN_QUEUES);
+   const char *compute = debug_get_option("KK_COMPUTE_QUEUES", "");
+   for (uint32_t i = 0; i < KK_MAX_COMPUTE_FAMILIES && *compute; i++) {
+      char *end;
+      const long n = strtol(compute, &end, 10);
+      settings->compute_queue_counts[i] = CLAMP(n, 0, KK_MAX_COMPUTE_QUEUES);
+      compute = *end == ',' ? end + 1 : end + strlen(end);
+   }
    settings->device_local_type =
       debug_get_bool_option("KK_DEVICE_LOCAL_TYPE", true);
 
@@ -1498,6 +1505,14 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
          (pdev->settings.sparse_enabled ? VK_QUEUE_SPARSE_BINDING_BIT : 0),
       .queue_count = pdev->settings.queue_count,
    };
+   for (uint32_t i = 0; i < KK_MAX_COMPUTE_FAMILIES; i++) {
+      if (!pdev->settings.compute_queue_counts[i])
+         break;
+      pdev->queue_families[pdev->queue_family_count++] = (struct kk_queue_family){
+         .queue_flags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+         .queue_count = pdev->settings.compute_queue_counts[i],
+      };
+   }
    assert(pdev->queue_family_count <= ARRAY_SIZE(pdev->queue_families));
 
    pdev->sync_binary_type = vk_sync_binary_get_type(&kk_sync_type);
