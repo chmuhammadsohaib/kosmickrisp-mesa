@@ -335,6 +335,19 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_alloc;
 
+   /* The MetalFX channel (kk_mfx_channel.h) runs over VK_NVX_binary_import and
+    * VK_NVX_image_view_handle. Games that reach DLSS through Streamline (DOOM:
+    * The Dark Ages) create their device without them, so the NGX runtime could
+    * never look the commands up. With KK_NVX the device always has them. */
+   if (pdev->settings.nvx_enabled) {
+      if (!dev->vk.enabled_extensions.NVX_binary_import ||
+          !dev->vk.enabled_extensions.NVX_image_view_handle)
+         fprintf(stderr, "[kk] nvx: enabling VK_NVX_binary_import and "
+                         "VK_NVX_image_view_handle the app didn't request\n");
+      dev->vk.enabled_extensions.NVX_binary_import = true;
+      dev->vk.enabled_extensions.NVX_image_view_handle = true;
+   }
+
    dev->vk.shader_ops = &kk_device_shader_ops;
    dev->mtl_handle = pdev->mtl_dev_handle;
    dev->vk.command_buffer_ops = &kk_cmd_buffer_ops;
