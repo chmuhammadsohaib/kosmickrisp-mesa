@@ -68,6 +68,60 @@ void mtl_fx_temporal_scaler_encode(
    mtl_fx_temporal_scaler *scaler, mtl_command_buffer *cmd_buf,
    const struct mtl_fx_temporal_scaler_frame *frame);
 
+typedef void mtl_fx_frame_interpolator;
+
+/* Fixed when the interpolator is created */
+struct mtl_fx_frame_interpolator_desc {
+   enum mtl_pixel_format color_format;
+   enum mtl_pixel_format depth_format;
+   enum mtl_pixel_format motion_format;
+   enum mtl_pixel_format output_format;
+   enum mtl_pixel_format ui_format; /* MTL_PIXEL_FORMAT_INVALID: no UI */
+   /* Depth and motion size */
+   uint32_t input_width;
+   uint32_t input_height;
+   /* Color and output size */
+   uint32_t output_width;
+   uint32_t output_height;
+};
+
+/* Set for every generated frame, in MetalFX's conventions */
+struct mtl_fx_frame_interpolator_frame {
+   mtl_texture *color;
+   mtl_texture *prev_color;
+   mtl_texture *depth;
+   mtl_texture *motion;
+   mtl_texture *ui; /* may be NULL */
+   mtl_texture *output;
+   float motion_scale_x, motion_scale_y;
+   float jitter_x, jitter_y;
+   float delta_time;
+   float near_plane, far_plane;
+   float field_of_view; /* vertical, degrees */
+   float aspect_ratio;
+   bool reset;
+   bool depth_reversed;
+   bool ui_composited;
+};
+
+bool mtl_fx_frame_interpolator_supported(mtl_device *device);
+mtl_fx_frame_interpolator *
+mtl_new_fx_frame_interpolator(mtl_device *device, mtl_compiler *compiler,
+                              const struct mtl_fx_frame_interpolator_desc *desc);
+/* A private texture the interpolator can write */
+mtl_texture *
+mtl_fx_interpolator_new_output_texture(mtl_device *device,
+                                       mtl_fx_frame_interpolator *interpolator);
+/* A private texture holding a copy of the previous color input */
+mtl_texture *
+mtl_fx_interpolator_new_color_texture(mtl_device *device,
+                                      mtl_fx_frame_interpolator *interpolator);
+/* The MTLTextureUsage the interpolator needs on its inputs */
+uint32_t mtl_fx_interpolator_input_usage(mtl_fx_frame_interpolator *interpolator);
+void mtl_fx_frame_interpolator_encode(
+   mtl_fx_frame_interpolator *interpolator, mtl_command_buffer *cmd_buf,
+   const struct mtl_fx_frame_interpolator_frame *frame);
+
 /* An argument table for a compute pass that binds two textures */
 mtl_argument_table *mtl_fx_new_texture_table(mtl_device *device);
 /* Runs `pipeline` over width x height threads in its own compute encoder,

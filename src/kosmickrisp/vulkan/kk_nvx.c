@@ -37,6 +37,7 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_cu_module, base, VkCuModuleNVX,
 
 struct kk_cu_function {
    struct vk_object_base base;
+   bool interpolate; /* KK_MFX_FUNCTION_INTERPOLATE, else the upscaler */
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_cu_function, base, VkCuFunctionNVX,
@@ -88,8 +89,11 @@ kk_CreateCuFunctionNVX(VkDevice device,
 {
    VK_FROM_HANDLE(kk_device, dev, device);
 
+   const bool interpolate =
+      pCreateInfo->pName &&
+      strcmp(pCreateInfo->pName, KK_MFX_FUNCTION_INTERPOLATE) == 0;
    if (!pCreateInfo->pName ||
-       strcmp(pCreateInfo->pName, KK_MFX_FUNCTION_UPSCALE) != 0) {
+       (!interpolate && strcmp(pCreateInfo->pName, KK_MFX_FUNCTION_UPSCALE) != 0)) {
       fprintf(stderr, "[kk] nvx: refusing unknown function \"%s\"\n",
               pCreateInfo->pName ? pCreateInfo->pName : "");
       return vk_error(dev, VK_ERROR_INITIALIZATION_FAILED);
@@ -100,6 +104,7 @@ kk_CreateCuFunctionNVX(VkDevice device,
                        VK_OBJECT_TYPE_CU_FUNCTION_NVX);
    if (!function)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   function->interpolate = interpolate;
 
    *pFunction = kk_cu_function_to_handle(function);
    return VK_SUCCESS;
@@ -121,8 +126,25 @@ kk_CmdCuLaunchKernelNVX(VkCommandBuffer commandBuffer,
                         const VkCuLaunchInfoNVX *pLaunchInfo)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(kk_cu_function, function, pLaunchInfo->function);
 
-   /* The only function is the upscaler; its parameter block is pParams */
+   if (function && function->interpolate) {
+      struct kk_mfx_interpolate_params params;
+      if (pLaunchInfo->paramCount != sizeof(params) || !pLaunchInfo->pParams) {
+         static uint32_t warn_count;
+         if (p_atomic_inc_return(&warn_count) <= 16)
+            fprintf(stderr,
+                    "[kk] nvx: ignoring an interpolation with %zu parameter "
+                    "bytes (expected %zu)\n",
+                    pLaunchInfo->paramCount, sizeof(params));
+         return;
+      }
+      memcpy(&params, pLaunchInfo->pParams, sizeof(params));
+      kk_mfx_cmd_interpolate(cmd, &params);
+      return;
+   }
+
+   /* The upscaler's parameter block is pParams */
    if ((pLaunchInfo->paramCount != sizeof(struct kk_mfx_upscale_params) &&
         pLaunchInfo->paramCount != KK_MFX_PARAMS_V1_SIZE) ||
        !pLaunchInfo->pParams) {

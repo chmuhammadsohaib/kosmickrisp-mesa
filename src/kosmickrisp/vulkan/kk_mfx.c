@@ -121,6 +121,34 @@ static const char kk_mfx_sharpen_source[] =
    "   dst.write(float4(max(result, 0.0), c4.a), uint2(OUTPUT_X, OUTPUT_Y) + gid);\n"
    "}\n";
 
+/* Frame generation keeps one interpolator; it holds a private output and a
+ * copy of the last color, which the next frame interpolates from. */
+struct kk_mfx_interpolator {
+   struct list_head link;
+   struct mtl_fx_frame_interpolator_desc desc;
+   mtl_fx_frame_interpolator *handle;
+   mtl_texture *output;
+   mtl_texture *prev_color;
+   bool has_prev_color;
+   /* Once retired: the interpolation count after which nothing in flight
+    * uses it */
+   uint64_t release_after;
+};
+
+static uint64_t kk_mfx_interpolate_count;
+
+static void
+kk_mfx_release_interpolator(struct kk_device *dev,
+                            struct kk_mfx_interpolator *interpolator)
+{
+   kk_device_remove_heap_from_residency_set(dev, interpolator->output);
+   kk_device_remove_heap_from_residency_set(dev, interpolator->prev_color);
+   mtl_release(interpolator->output);
+   mtl_release(interpolator->prev_color);
+   mtl_release(interpolator->handle);
+   free(interpolator);
+}
+
 struct kk_mfx_sharpener {
    struct list_head link;
    uint32_t step, output_x, output_y;
@@ -140,6 +168,8 @@ kk_mfx_init(struct kk_device *dev)
    dev->mfx.texture_table = NULL;
    dev->mfx.last_scaler = NULL;
    dev->mfx.last_output = NULL;
+   dev->mfx.interpolator = NULL;
+   list_inithead(&dev->mfx.retired_interpolators);
 
    kk_mfx_signs = kk_mfx_default_signs;
    kk_mfx_content_mode = debug_get_bool_option("KK_MFX_CONTENT_MODE", false);
@@ -169,6 +199,11 @@ kk_mfx_finish(struct kk_device *dev)
       mtl_release(sharpener->pipeline);
       free(sharpener);
    }
+   if (dev->mfx.interpolator)
+      kk_mfx_release_interpolator(dev, dev->mfx.interpolator);
+   list_for_each_entry_safe(struct kk_mfx_interpolator, interpolator,
+                            &dev->mfx.retired_interpolators, link)
+      kk_mfx_release_interpolator(dev, interpolator);
    if (dev->mfx.texture_table)
       mtl_release(dev->mfx.texture_table);
    simple_mtx_destroy(&dev->mfx.mutex);
@@ -341,7 +376,7 @@ kk_mfx_warn(const char *message, uint64_t handle)
 {
    static uint32_t warn_count;
    if (p_atomic_inc_return(&warn_count) <= 16)
-      fprintf(stderr, "[kk] mfx: upscale skipped: %s (0x%" PRIx64 ")\n",
+      fprintf(stderr, "[kk] mfx: skipped: %s (0x%" PRIx64 ")\n",
               message, handle);
 }
 
@@ -530,4 +565,217 @@ kk_mfx_cmd_upscale(struct kk_cmd_buffer *cmd,
       (struct mtl_size){params->output_width, params->output_height, 1},
       output, output_view->vk.base_array_layer, output_view->vk.base_mip_level,
       (struct mtl_origin){params->output_x, params->output_y, 0});
+}
+
+/* The interpolator for these inputs, creating it (and retiring the previous
+ * one) when they change. Called with dev->mfx.mutex held. */
+static struct kk_mfx_interpolator *
+kk_mfx_get_interpolator(struct kk_device *dev,
+                        const struct mtl_fx_frame_interpolator_desc *desc)
+{
+   const uint64_t count = ++kk_mfx_interpolate_count;
+   list_for_each_entry_safe(struct kk_mfx_interpolator, retired,
+                            &dev->mfx.retired_interpolators, link) {
+      if (retired->release_after <= count) {
+         list_del(&retired->link);
+         kk_mfx_release_interpolator(dev, retired);
+      }
+   }
+
+   struct kk_mfx_interpolator *current = dev->mfx.interpolator;
+   if (current && memcmp(&current->desc, desc, sizeof(*desc)) == 0)
+      return current;
+
+   struct kk_mfx_interpolator *interpolator = calloc(1, sizeof(*interpolator));
+   if (!interpolator)
+      return NULL;
+   interpolator->desc = *desc;
+   interpolator->handle = mtl_new_fx_frame_interpolator(
+      dev->mtl_handle, dev->mtl_compiler_handle, desc);
+   if (interpolator->handle) {
+      interpolator->output = mtl_fx_interpolator_new_output_texture(
+         dev->mtl_handle, interpolator->handle);
+      interpolator->prev_color = mtl_fx_interpolator_new_color_texture(
+         dev->mtl_handle, interpolator->handle);
+   }
+   if (!interpolator->output || !interpolator->prev_color) {
+      if (interpolator->output)
+         mtl_release(interpolator->output);
+      if (interpolator->prev_color)
+         mtl_release(interpolator->prev_color);
+      if (interpolator->handle)
+         mtl_release(interpolator->handle);
+      free(interpolator);
+      return NULL;
+   }
+   kk_device_add_heap_to_residency_set(dev, interpolator->output);
+   kk_device_add_heap_to_residency_set(dev, interpolator->prev_color);
+
+   if (current) {
+      current->release_after = count + KK_MFX_RELEASE_DELAY;
+      list_add(&current->link, &dev->mfx.retired_interpolators);
+   }
+   dev->mfx.interpolator = interpolator;
+
+   fprintf(stderr,
+           "[kk] mfx: created frame interpolator %ux%u (depth/motion %ux%u, "
+           "formats color %u depth %u motion %u output %u ui %u)\n",
+           desc->output_width, desc->output_height, desc->input_width,
+           desc->input_height, desc->color_format, desc->depth_format,
+           desc->motion_format, desc->output_format, desc->ui_format);
+   return interpolator;
+}
+
+void
+kk_mfx_cmd_interpolate(struct kk_cmd_buffer *cmd,
+                       const struct kk_mfx_interpolate_params *params)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+
+   if (params->magic != KK_MFX_INTERPOLATE_MAGIC ||
+       params->version != KK_MFX_INTERPOLATE_VERSION) {
+      kk_mfx_warn("bad interpolation parameter block", params->magic);
+      return;
+   }
+   if (!params->width || !params->height || !params->input_width ||
+       !params->input_height) {
+      kk_mfx_warn("empty interpolation size", 0);
+      return;
+   }
+
+   const struct {
+      uint64_t handle;
+      const char *name;
+   } inputs[] = {
+      {params->color, "color"},
+      {params->depth, "depth"},
+      {params->motion, "motion"},
+      {params->output, "output"},
+   };
+   struct kk_image_view *views[4];
+   for (unsigned i = 0; i < ARRAY_SIZE(inputs); i++) {
+      views[i] = kk_mfx_view_from_handle(dev, inputs[i].handle);
+      if (!views[i]) {
+         kk_mfx_warn(inputs[i].name, inputs[i].handle);
+         return;
+      }
+   }
+   struct kk_image_view *prev_view =
+      params->prev_color ? kk_mfx_view_from_handle(dev, params->prev_color)
+                         : NULL;
+   const bool ui_separate = params->flags & KK_MFX_INTERPOLATE_UI_SEPARATE;
+   struct kk_image_view *ui_view =
+      params->ui ? kk_mfx_view_from_handle(dev, params->ui) : NULL;
+
+   mtl_texture *color = kk_mfx_view_texture(views[0]);
+   mtl_texture *depth = kk_mfx_view_texture(views[1]);
+   mtl_texture *motion = kk_mfx_view_texture(views[2]);
+   struct kk_image_view *output_view = views[3];
+   struct kk_image *output_image =
+      container_of(output_view->vk.image, struct kk_image, vk);
+   mtl_texture *output = output_image->planes[0].mtl_handle;
+   mtl_texture *ui = ui_view ? kk_mfx_view_texture(ui_view) : NULL;
+
+   const struct mtl_fx_frame_interpolator_desc desc = {
+      .color_format = mtl_texture_get_pixel_format(color),
+      .depth_format = mtl_texture_get_pixel_format(depth),
+      .motion_format = mtl_texture_get_pixel_format(motion),
+      .output_format = mtl_texture_get_pixel_format(output),
+      .ui_format = ui ? mtl_texture_get_pixel_format(ui) : MTL_PIXEL_FORMAT_INVALID,
+      .input_width = params->input_width,
+      .input_height = params->input_height,
+      .output_width = params->width,
+      .output_height = params->height,
+   };
+
+   simple_mtx_lock(&dev->mfx.mutex);
+   struct kk_mfx_interpolator *interpolator = kk_mfx_get_interpolator(dev, &desc);
+   simple_mtx_unlock(&dev->mfx.mutex);
+   if (!interpolator) {
+      kk_mfx_warn("no frame interpolator for these formats and sizes",
+                  params->color);
+      return;
+   }
+   const uint32_t needed = mtl_fx_interpolator_input_usage(interpolator->handle);
+   if ((mtl_texture_get_usage(color) & needed) != needed ||
+       (mtl_texture_get_usage(depth) & needed) != needed ||
+       (mtl_texture_get_usage(motion) & needed) != needed) {
+      kk_mfx_warn("an interpolation input lacks the usage MetalFX needs", needed);
+      return;
+   }
+
+   /* MetalFX encodes its own passes, so no encoder may be open */
+   if (cmd->metal.render) {
+      kk_apply_attachment_store_ops(cmd, true);
+      cs_end(cmd);
+      kk_cmd_buffer_dirty_all_gfx(cmd);
+      cmd->state.gfx.need_to_start_render_pass = true;
+   }
+   cs_end(cmd);
+
+   simple_mtx_lock(&dev->mfx.mutex);
+   /* Without a previous frame there is nothing to interpolate from yet: the
+    * current color stands in, with history reset */
+   mtl_texture *prev = prev_view ? kk_mfx_view_texture(prev_view)
+                                 : interpolator->prev_color;
+   const bool first = !prev_view && !interpolator->has_prev_color;
+   const float fov_degrees =
+      params->fov > 0.0f ? params->fov * (180.0f / (float)M_PI) : 60.0f;
+   const struct mtl_fx_frame_interpolator_frame frame = {
+      .color = color,
+      .prev_color = first ? color : prev,
+      .depth = depth,
+      .motion = motion,
+      .ui = ui,
+      .output = interpolator->output,
+      .motion_scale_x = kk_mfx_signs.motion_x * params->mv_scale_x,
+      .motion_scale_y = kk_mfx_signs.motion_y * params->mv_scale_y,
+      .jitter_x = kk_mfx_signs.jitter_x * params->jitter_x,
+      .jitter_y = kk_mfx_signs.jitter_y * params->jitter_y,
+      .delta_time = params->delta_time > 0.0f ? params->delta_time : 1.0f / 60.0f,
+      .near_plane = params->near_plane > 0.0f ? params->near_plane : 0.1f,
+      .far_plane = params->far_plane > 0.0f ? params->far_plane : 10000.0f,
+      .field_of_view = fov_degrees,
+      .aspect_ratio = params->aspect_ratio > 0.0f
+                         ? params->aspect_ratio
+                         : (float)params->width / params->height,
+      .reset = first || (params->flags & KK_MFX_INTERPOLATE_RESET),
+      .depth_reversed = params->flags & KK_MFX_INTERPOLATE_DEPTH_INVERTED,
+      .ui_composited = ui && !ui_separate,
+   };
+   mtl_fx_frame_interpolator_encode(interpolator->handle, cmd->metal.cmd_buf,
+                                    &frame);
+   interpolator->has_prev_color = true;
+   simple_mtx_unlock(&dev->mfx.mutex);
+
+   /* Once MetalFX is done: the generated frame into the app's image, and this
+    * frame's color kept for the next interpolation */
+   mtl_compute_encoder *encoder = cs_get_compute(cmd);
+   mtl_barrier_after_queue_stages(encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
+   mtl_copy_from_texture_to_texture(
+      encoder, interpolator->output, 0, 0, (struct mtl_origin){0, 0, 0},
+      (struct mtl_size){params->width, params->height, 1}, output,
+      output_view->vk.base_array_layer, output_view->vk.base_mip_level,
+      (struct mtl_origin){params->output_x, params->output_y, 0});
+   if (!prev_view) {
+      mtl_copy_from_texture_to_texture(
+         encoder, color, 0, 0,
+         (struct mtl_origin){params->color_x, params->color_y, 0},
+         (struct mtl_size){params->width, params->height, 1},
+         interpolator->prev_color, 0, 0, (struct mtl_origin){0, 0, 0});
+   }
+   struct kk_image_view *real_view =
+      params->output_real ? kk_mfx_view_from_handle(dev, params->output_real)
+                          : NULL;
+   if (real_view && real_view != views[0]) {
+      struct kk_image *real_image =
+         container_of(real_view->vk.image, struct kk_image, vk);
+      mtl_copy_from_texture_to_texture(
+         encoder, color, 0, 0,
+         (struct mtl_origin){params->color_x, params->color_y, 0},
+         (struct mtl_size){params->width, params->height, 1},
+         real_image->planes[0].mtl_handle, real_view->vk.base_array_layer,
+         real_view->vk.base_mip_level,
+         (struct mtl_origin){params->output_x, params->output_y, 0});
+   }
 }
