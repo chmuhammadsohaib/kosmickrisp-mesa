@@ -38,6 +38,8 @@ Most additions are opt-in with environment variables, so with none set the drive
 - Less CPU per frame: dynamic depth/stencil states are cached, the residency set is only committed when it changes,
   sparse binds are batched, waits on any of several semaphores sleep instead of polling.
 - MetalFX objects are freed when FSR or DLSS is turned off and when the output resolution changes.
+- Device-local memory the host can't see is Metal private storage, so render targets and textures there can be
+  compressed losslessly (`KK_PRIVATE_DEVICE_LOCAL=0` keeps it shared).
 
 Everything above keeps the rendered output identical except Metal's own summation order for subgroup float sums;
 `KK_EXACT=1` turns off any optimization that can change output.
