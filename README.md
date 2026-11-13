@@ -29,6 +29,19 @@ Most additions are opt-in with environment variables, so with none set the drive
 | compute queue families | Up to two compute and transfer queue families, for engines that want a family of their own for async compute | `KK_COMPUTE_QUEUES=n[,m]` |
 | wsi/metal: rgba8 swapchains | `R8G8B8A8` swapchains, presented through a BGRA8 layer | |
 
+## Performance
+
+- Compiled shaders are kept across runs (Mesa's disk cache, under `~/.cache/mesa_shader_cache`): DOOM: The Dark
+  Ages reaches its menu shell in about 2 s instead of 10 s from the second launch on.
+- Small animated BLASes build fast without Metal's refit layout; ray queries that never inspect candidates let the
+  hardware cull them; whole-subgroup reductions are native Metal `simd_*` instructions.
+- Less CPU per frame: dynamic depth/stencil states are cached, the residency set is only committed when it changes,
+  sparse binds are batched, waits on any of several semaphores sleep instead of polling.
+- MetalFX objects are freed when FSR or DLSS is turned off and when the output resolution changes.
+
+Everything above keeps the rendered output identical except Metal's own summation order for subgroup float sums;
+`KK_EXACT=1` turns off any optimization that can change output.
+
 ## Building
 
 On an Apple silicon Mac with macOS 26 or later (KosmicKrisp needs Metal 4):
