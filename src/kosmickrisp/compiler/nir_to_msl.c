@@ -551,7 +551,11 @@ alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
       /* kosmickrisp-nan-safe-minmax: NIR's fmin/fmax return the non-NaN operand; keep
        * that under fast math: "isnan(a) ? b : (isnan(b) ? a : (min/max))". */
       unsigned nanGuards = 0;
-      if (ctx->shader->info.stage != MESA_SHADER_VERTEX) {
+      /* For 32 bits, precise::fmin/fmax do exactly that in one instruction
+       * (IEEE, not subject to fast math); precise:: is fp32 only */
+      const bool precise32 = ctx->shader->info.stage != MESA_SHADER_VERTEX &&
+                             instr->def.bit_size == 32;
+      if (ctx->shader->info.stage != MESA_SHADER_VERTEX && !precise32) {
          for (unsigned i = 0; i < 2; i++) {
             if (nir_src_is_const(instr->src[i].src))
                continue;
@@ -574,7 +578,10 @@ alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
          alu_src_to_msl(ctx, instr, 1);
          P(ctx, "))) : ");
       }
-      alu_funclike_precise(ctx, instr, is_min ? "fmin" : "fmax");
+      if (precise32)
+         alu_funclike(ctx, instr, is_min ? "precise::fmin" : "precise::fmax");
+      else
+         alu_funclike_precise(ctx, instr, is_min ? "fmin" : "fmax");
       P(ctx, ")");
       for (unsigned i = 0; i < nanGuards; i++)
          P(ctx, ")");
