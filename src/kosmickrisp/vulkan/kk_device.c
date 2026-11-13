@@ -29,6 +29,8 @@
 #include "kk_dispatch_cmd.h"
 #include "vk_cmd_enqueue_entrypoints.h"
 #include "vk_common_entrypoints.h"
+#include "vk_pipeline_cache.h"
+#include "util/hash_table.h"
 
 #include "vulkan/wsi/wsi_common.h"
 #include "vk_pipeline_cache.h"
@@ -406,6 +408,17 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
       }
    }
 
+   /* The cache pipelines go through when the app gives none; backed by the
+    * physical device's disk cache, it keeps compiled shaders across runs */
+   struct vk_pipeline_cache_create_info cache_info = {
+      .weak_ref = true,
+   };
+   dev->vk.mem_cache = vk_pipeline_cache_create(&dev->vk, &cache_info, NULL);
+   if (dev->vk.mem_cache == NULL) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail_queues;
+   }
+
    result = kk_device_init_meta(dev);
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
@@ -435,11 +448,13 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
 
 fail_sampler_heap:
    kk_destroy_sampler_heap(dev, &dev->samplers);
+   kk_device_finish_ds_states(dev);
 fail_query_table:
    kk_query_table_finish(dev, &dev->occlusion_queries);
 fail_meta:
    kk_device_finish_meta(dev);
 fail_mem_cache:
+   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
 fail_queues:
    for (uint32_t i = 0; i < dev->extra_queue_count; i++)
       kk_queue_finish(dev, &dev->extra_queues[i]);
@@ -489,7 +504,13 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    kk_device_finish_lib(dev);
    kk_query_table_finish(dev, &dev->occlusion_queries);
    kk_destroy_sampler_heap(dev, &dev->samplers);
+   kk_device_finish_ds_states(dev);
 
+   /* The cache holds weak references: shaders of pipelines the app never
+    * destroyed are still in it, leaked with those pipelines */
+   if (dev->vk.mem_cache->object_cache)
+      _mesa_set_clear(dev->vk.mem_cache->object_cache, NULL);
+   vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
    kk_device_finish_rt(dev);
    kk_device_finish_as_pool(dev);
    kk_device_finish_as_slots(dev);

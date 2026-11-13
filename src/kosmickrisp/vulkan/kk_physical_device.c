@@ -1216,6 +1216,16 @@ kk_get_device_properties(
    }
 }
 
+/* Settings that change shader compilation, for the cache keys */
+static uint64_t
+kk_physical_device_compiler_flags(const struct kk_physical_device *pdev)
+{
+   return (uint64_t)pdev->settings.experimental_enabled |
+          (uint64_t)pdev->settings.ray_tracing_enabled << 1 |
+          (uint64_t)pdev->settings.sparse_enabled << 2 |
+          (uint64_t)pdev->settings.nvx_enabled << 3;
+}
+
 static void
 kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
 {
@@ -1226,6 +1236,12 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
 
    _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                        sizeof(instance->driver_build_sha));
+   /* Settings that change the shaders we generate: a cache made under other
+    * ones must not be taken */
+   const uint64_t flags = kk_physical_device_compiler_flags(pdev);
+   _mesa_blake3_update(&blake3_ctx, &flags, sizeof(flags));
+   _mesa_blake3_update(&blake3_ctx, &pdev->settings.disabled_workarounds,
+                       sizeof(pdev->settings.disabled_workarounds));
 
    unsigned char blake3[BLAKE3_KEY_LEN];
    _mesa_blake3_final(&blake3_ctx, blake3);
@@ -1233,6 +1249,17 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
+
+#ifdef ENABLE_SHADER_CACHE
+   /* Compiled shaders (NIR to MSL) are kept across runs, so a game's
+    * pipelines don't go through SPIR-V, NIR and MSL generation again every
+    * launch; Metal caches its own compiles of the MSL */
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, instance->driver_build_sha);
+   pdev->vk.disk_cache =
+      disk_cache_create("kosmickrisp", timestamp,
+                        flags ^ pdev->settings.disabled_workarounds);
+#endif
 }
 
 static void
