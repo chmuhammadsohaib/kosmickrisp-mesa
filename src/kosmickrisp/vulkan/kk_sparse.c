@@ -253,6 +253,24 @@ kk_bind_sparse_image_opaque(struct kk_queue *queue,
             kk_image_opaque_page(image, first + p);
          mapping.map = bind->memory != VK_NULL_HANDLE;
          mapping.heap_page = bind->memoryOffset / MTL_SPARSE_PAGE_SIZE_B + p;
+
+         /* Pages along a row of a level's tiles join the previous region:
+          * Metal gives a region's tiles heap pages in X order, so they stay
+          * consecutive. One operation per row instead of one per page. */
+         struct mtl_sparse_texture_mapping *last =
+            util_dynarray_num_elements(&mappings,
+                                       struct mtl_sparse_texture_mapping)
+               ? util_dynarray_top_ptr(&mappings,
+                                       struct mtl_sparse_texture_mapping)
+               : NULL;
+         if (last && mapping.level < image->sparse_info.first_tail_level &&
+             last->level == mapping.level && last->slice == mapping.slice &&
+             last->size.y == 1 && last->origin.y == mapping.origin.y &&
+             last->origin.x + last->size.x == mapping.origin.x &&
+             last->heap_page + last->size.x == mapping.heap_page) {
+            last->size.x++;
+            continue;
+         }
          util_dynarray_append(&mappings, mapping);
       }
 
