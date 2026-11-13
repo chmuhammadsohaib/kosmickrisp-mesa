@@ -276,3 +276,15 @@ mtl_render_set_stencil_store_action(mtl_render_encoder *encoder,
                                     enum mtl_store_action action)
 {
 }
+
+void
+mtl_render_execute_commands_indirect(mtl_render_encoder *encoder,
+                                     mtl_indirect_command_buffer *icb,
+                                     uint64_t range_addr)
+{
+}
+
+void
+mtl_render_barrier_vertex_writes(mtl_render_encoder *encoder)
+{
+}

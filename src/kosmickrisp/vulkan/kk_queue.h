@@ -29,6 +29,8 @@ struct kk_queue {
    struct kk_cmd_pool *cmd_pool;
    struct util_dynarray free_cmd_buffers;
    uint32_t commits_in_flight;
+   /* KK_GPU_TIMELINE: waits of the submit whose first commit is next */
+   uint32_t timeline_waits;
    mtx_t mutex;
    cnd_t cond;
 };
@@ -44,5 +46,8 @@ VkResult kk_queue_init(struct kk_device *dev, struct kk_queue *queue,
                        uint32_t index_in_family);
 
 void kk_queue_finish(struct kk_device *dev, struct kk_queue *queue);
+
+/* KK_GPU_TIMELINE: the buffer real draw counts are added to */
+void kk_tl_init_device(struct kk_device *dev);
 
 #endif

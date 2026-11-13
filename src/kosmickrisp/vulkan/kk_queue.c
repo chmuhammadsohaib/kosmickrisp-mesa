@@ -26,6 +26,186 @@ struct kk_commit_data {
    struct kk_cmd_buffer *cmd;
 };
 
+/* KK_GPU_TIMELINE=1: once a second, how busy the GPU was across all queues,
+ * how busy each queue was, and how long committed work waited before the GPU
+ * started it (event waits, other queues, scheduling), from Metal's commit
+ * feedback. For finding frames that wait instead of render. */
+#include <mach/mach_time.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define KK_TL_MAX_QUEUES 8
+#define KK_TL_MAX_SPANS 8192
+
+struct kk_tl_commit {
+   mtl_feedback_handler_callback callback;
+   void *user_data;
+   uint32_t queue;
+   uint32_t waits;
+   double committed;
+};
+
+static struct {
+   int enabled; /* -1: not read yet */
+   mtx_t lock;
+   const void *queues[KK_TL_MAX_QUEUES];
+   double window;
+   uint32_t spans;
+   double start[KK_TL_MAX_SPANS], end[KK_TL_MAX_SPANS];
+   double queue_busy[KK_TL_MAX_QUEUES];
+   uint32_t queue_commits[KK_TL_MAX_QUEUES], queue_waiting[KK_TL_MAX_QUEUES];
+   double latency_sum, latency_max;
+   uint32_t commits;
+} kk_tl = {.enabled = -1};
+
+static uint32_t kk_tl_draws[4];
+uint32_t *kk_tl_draw_counters;
+static bool kk_tl_enabled(void);
+
+/* libkk_count_draws' totals, in a buffer the GPU adds to */
+uint64_t kk_tl_draw_stats_gpu;
+static uint32_t *kk_tl_draw_stats;
+
+void
+kk_tl_init_device(struct kk_device *dev)
+{
+   static struct kk_bo *bo;
+   if (!kk_tl_enabled() || bo)
+      return;
+   if (kk_alloc_bo(dev, &dev->vk.base, 64u, 0, &bo) == VK_SUCCESS) {
+      memset(bo->cpu, 0, 64u);
+      kk_tl_draw_stats = bo->cpu;
+      kk_tl_draw_stats_gpu = bo->gpu;
+   }
+}
+
+static double
+kk_tl_now(void)
+{
+   static mach_timebase_info_data_t tb;
+   if (!tb.denom)
+      mach_timebase_info(&tb);
+   return (double)mach_absolute_time() * tb.numer / tb.denom / 1e9;
+}
+
+static bool
+kk_tl_enabled(void)
+{
+   if (unlikely(kk_tl.enabled < 0)) {
+      const char *v = getenv("KK_GPU_TIMELINE");
+      mtx_init(&kk_tl.lock, mtx_plain);
+      kk_tl.enabled = v && v[0] == '1';
+      if (kk_tl.enabled)
+         kk_tl_draw_counters = kk_tl_draws;
+   }
+   return kk_tl.enabled;
+}
+
+static int
+kk_tl_cmp(const void *a, const void *b)
+{
+   double x = *(const double *)a, y = *(const double *)b;
+   return x < y ? -1 : x > y;
+}
+
+/* Union of the window's GPU spans; sorts by start, carrying ends along */
+static double
+kk_tl_union(void)
+{
+   double pairs[KK_TL_MAX_SPANS][2];
+   for (uint32_t i = 0; i < kk_tl.spans; i++) {
+      pairs[i][0] = kk_tl.start[i];
+      pairs[i][1] = kk_tl.end[i];
+   }
+   qsort(pairs, kk_tl.spans, sizeof(pairs[0]), kk_tl_cmp);
+   double busy = 0, s = 0, e = -1;
+   for (uint32_t i = 0; i < kk_tl.spans; i++) {
+      if (pairs[i][0] > e) {
+         if (e > s)
+            busy += e - s;
+         s = pairs[i][0];
+         e = pairs[i][1];
+      } else if (pairs[i][1] > e) {
+         e = pairs[i][1];
+      }
+   }
+   if (e > s)
+      busy += e - s;
+   return busy;
+}
+
+static void
+kk_tl_report_locked(void)
+{
+   if (!kk_tl.commits)
+      return;
+   fprintf(stderr, "[kk] gpu-timeline: busy %.0f%% | %u commits, waited %.2f ms avg %.2f ms max before starting |",
+           100.0 * kk_tl_union(), kk_tl.commits, 1e3 * kk_tl.latency_sum / kk_tl.commits,
+           1e3 * kk_tl.latency_max);
+   for (uint32_t q = 0; q < KK_TL_MAX_QUEUES && kk_tl.queues[q]; q++)
+      fprintf(stderr, " q%u %.0f%% (%u, %u with waits)", q, 100.0 * kk_tl.queue_busy[q],
+              kk_tl.queue_commits[q], kk_tl.queue_waiting[q]);
+   fprintf(stderr, " | Metal draws %u, %u indirect-count calls expanded to %u, %u GPU-built",
+           p_atomic_xchg(&kk_tl_draws[0], 0), p_atomic_xchg(&kk_tl_draws[1], 0),
+           p_atomic_xchg(&kk_tl_draws[2], 0), p_atomic_xchg(&kk_tl_draws[3], 0));
+   if (kk_tl_draw_stats)
+      fprintf(stderr, ", real draws %u (largest call %u, %u calls)",
+              p_atomic_xchg(&kk_tl_draw_stats[0], 0), p_atomic_xchg(&kk_tl_draw_stats[1], 0),
+              p_atomic_xchg(&kk_tl_draw_stats[2], 0));
+   fprintf(stderr, "\n");
+   memset(kk_tl.queue_busy, 0, sizeof(kk_tl.queue_busy));
+   memset(kk_tl.queue_commits, 0, sizeof(kk_tl.queue_commits));
+   memset(kk_tl.queue_waiting, 0, sizeof(kk_tl.queue_waiting));
+   kk_tl.spans = kk_tl.commits = 0;
+   kk_tl.latency_sum = kk_tl.latency_max = 0;
+}
+
+static void
+kk_tl_feedback(struct mtl_feedback_data *data)
+{
+   struct kk_tl_commit *c = data->user_data;
+   mtx_lock(&kk_tl.lock);
+   if (data->gpu_end > kk_tl.window + 1.0) {
+      kk_tl_report_locked();
+      kk_tl.window = data->gpu_end;
+   }
+   if (data->gpu_end > data->gpu_start && data->gpu_start > 0) {
+      double start = MAX2(data->gpu_start, kk_tl.window);
+      if (kk_tl.spans < KK_TL_MAX_SPANS && data->gpu_end > start) {
+         kk_tl.start[kk_tl.spans] = start;
+         kk_tl.end[kk_tl.spans++] = data->gpu_end;
+         kk_tl.queue_busy[c->queue] += data->gpu_end - start;
+      }
+      double latency = data->gpu_start - c->committed;
+      if (latency > 0) {
+         kk_tl.latency_sum += latency;
+         kk_tl.latency_max = MAX2(kk_tl.latency_max, latency);
+      }
+   }
+   kk_tl.commits++;
+   kk_tl.queue_commits[c->queue]++;
+   kk_tl.queue_waiting[c->queue] += c->waits > 0;
+   mtx_unlock(&kk_tl.lock);
+
+   data->user_data = c->user_data;
+   c->callback(data);
+   free(c);
+}
+
+static uint32_t
+kk_tl_queue_index(const struct kk_queue *queue)
+{
+   for (uint32_t q = 0; q < KK_TL_MAX_QUEUES; q++) {
+      if (kk_tl.queues[q] == queue)
+         return q;
+      if (!kk_tl.queues[q]) {
+         kk_tl.queues[q] = queue;
+         return q;
+      }
+   }
+   return KK_TL_MAX_QUEUES - 1;
+}
+
 static void
 kk_queue_wait_for_commits(struct kk_queue *queue)
 {
@@ -52,6 +232,12 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
          dev->sync_debug.last_error = data->error;
    }
    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
+      /* Games often just wait forever once the device is lost; say so once */
+      static bool reported;
+      if (!p_atomic_xchg(&reported, true))
+         fprintf(stderr, "[kk] GPU error: %s (%s); the device is lost\n",
+                 mtl_command_queue_error_to_string(data->error),
+                 data->error_message ? data->error_message : "no message");
       vk_device_set_lost(
          &dev->vk, "Command queue error: %s, with message \"%s\"",
          mtl_command_queue_error_to_string(data->error), data->error_message);
@@ -109,6 +295,19 @@ kk_queue_commit(struct kk_queue *queue, struct kk_cmd_buffer *cmd,
    KK_RT_STATS_ADD(kk_queue_device(queue), KK_RT_STAT_CMDS_COMMITTED, 1);
    if (unlikely(kk_queue_device(queue)->sync_debug.enabled))
       p_atomic_inc(&kk_queue_device(queue)->sync_debug.committed);
+
+   if (unlikely(kk_tl_enabled())) {
+      struct kk_tl_commit *c = malloc(sizeof(*c));
+      if (c) {
+         mtx_lock(&kk_tl.lock);
+         *c = (struct kk_tl_commit){callback, user_data, kk_tl_queue_index(queue),
+                                    queue->timeline_waits, kk_tl_now()};
+         mtx_unlock(&kk_tl.lock);
+         queue->timeline_waits = 0;
+         callback = kk_tl_feedback;
+         user_data = c;
+      }
+   }
 
    mtl_commit_options *options = mtl_new_commit_options();
    mtl_commit_options_add_feedback_handler(options, callback, user_data);
@@ -210,6 +409,8 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
          container_of(wait->sync, struct kk_sync_timeline, base);
       mtl_wait_for_event(queue->mtl_handle, sync->mtl_handle, wait->wait_value);
    }
+   /* The first commit of this submit is the one that waits */
+   queue->timeline_waits = submit->wait_count;
 
    /* Ensure any changes to residency are propagated before we submit any
     * work. All resources should have been allocated before submission.

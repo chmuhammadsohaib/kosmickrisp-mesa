@@ -13,6 +13,7 @@
 #include "kk_rt_stats.h"
 
 #include "kk_descriptor_set.h"
+#include "kk_icb.h"
 #include "kk_image.h"
 #include "kk_nir_lower_vbo.h"
 #include "kk_shader.h"
@@ -279,6 +280,7 @@ struct kk_cmd_buffer {
 
    /* Owned large BOs */
    struct util_dynarray large_bos;
+   struct kk_icb_cmd icb;
    /* Ray tracing stacks (struct kk_bo *), given back to the device on reset */
    struct util_dynarray rt_stacks;
 

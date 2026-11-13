@@ -11,6 +11,10 @@
 
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
+
+/* KK_GPU_TIMELINE (kk_queue.c): Metal draws, indirect-count calls and the draws they expand to */
+extern uint32_t *kk_tl_draw_counters;
+extern uint64_t kk_tl_draw_stats_gpu;
 #include "kk_format.h"
 #include "kk_image_view.h"
 #include "kk_physical_device.h"
@@ -1519,6 +1523,9 @@ kk_predicate_draws(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
          libkk_predicate_indirect_gt_draw_id(cmd, grid, true, patched.gpu,
                                              in_addr, addr, out_stride_el,
                                              in_stride_el);
+         if (unlikely(kk_tl_draw_stats_gpu))
+            libkk_count_draws(cmd, kk_grid_1d(1), true, kk_tl_draw_stats_gpu,
+                              addr, data->draw_count);
          break;
       case KK_PREDICATE_EQ_ZERO:
          libkk_predicate_indirect_eq_zero(cmd, grid, true, patched.gpu, in_addr,
@@ -2056,9 +2063,82 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
    return draw;
 }
 
+/* Indirect-count draws as GPU-built draws (KK_ICB_DRAWS, kk_icb.h): a
+ * rasterization-off vertex pass writes the draws the count asks for into an
+ * indirect command buffer and the ICB runs with that count as its range, all
+ * inside the render pass. Draws that need per-draw data, unrolling,
+ * tessellation, geometry emulation or multiview keep the old path. */
+static bool
+kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct kk_graphics_state *gfx = &cmd->state.gfx;
+   struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
+
+   if (!dev->icb.encode_pipeline || !vs || data->upload_mask ||
+       data->draw_count > kk_device_physical(dev)->settings.icb_draws_max ||
+       cmd->state.shaders[MESA_SHADER_TESS_EVAL] ||
+       vs->pipeline.gfx.pre_render_count || gfx->render.view_mask ||
+       (data->indirect_command.stride & 3u) || requires_unroll(cmd, data))
+      return false;
+   if (data->indexed && (!data->index_buffer.addr ||
+                         (data->index_buffer_el_size_B != 2u &&
+                          data->index_buffer_el_size_B != 4u)))
+      return false;
+
+   struct kk_icb_chunk chunk;
+   struct kk_ptr p = kk_pool_alloc(cmd, sizeof(struct kk_icb_encode_params), 8u);
+   if (unlikely(!p.gpu) || !kk_icb_reserve(cmd, data->draw_count, &chunk))
+      return false;
+
+   bool cond = data->predicate_count > 1;
+   uint64_t range =
+      p.gpu + offsetof(struct kk_icb_encode_params, range_location);
+   *(struct kk_icb_encode_params *)p.cpu = (struct kk_icb_encode_params){
+      .icb = p.gpu + offsetof(struct kk_icb_encode_params, icb_id),
+      .args = data->indirect_command.addr,
+      .count = data->predicate_addr[0],
+      .cond = cond ? data->predicate_addr[1] : 0u,
+      .range = range,
+      .index_buffer = data->indexed ? data->index_buffer.addr : 0u,
+      .stride = data->indirect_command.stride,
+      .max_draws = data->draw_count,
+      .location = 0u,
+      .mode = !data->indexed                          ? 0u
+              : data->index_buffer_el_size_B == 2u ? 1u
+                                                   : 2u,
+      .prim = mesa_prim_to_mtl_primitive_type(data->prim),
+      .cond_inverted = cond && data->predicate_op[1] == KK_PREDICATE_EQ_ZERO,
+      .icb_id = chunk.resource_id,
+   };
+
+   mtl_render_encoder *enc = cs_get_render(cmd);
+   /* The previous call's draws have launched before this one rewrites them */
+   if (cmd->icb.executed)
+      mtl_render_barrier_vertex_writes(enc);
+   mtl_set_address(cmd->argument_table, p.gpu, 0u);
+   mtl_render_set_pipeline_state(enc, dev->icb.encode_pipeline);
+   mtl_draw_primitives(enc, MTL_PRIMITIVE_TYPE_POINT, 0u, data->draw_count, 1u,
+                       0u);
+   mtl_render_barrier_vertex_writes(enc);
+
+   /* The ICB inherits the app's pipeline and bindings */
+   mtl_render_set_pipeline_state(enc, vs->pipeline.gfx.render);
+   if (gfx->depth_stencil_state)
+      mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
+   mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
+   mtl_render_execute_commands_indirect(enc, chunk.handle, range);
+   cmd->icb.executed = true;
+
+   if (unlikely(kk_tl_draw_counters))
+      p_atomic_inc(&kk_tl_draw_counters[3]);
+   return true;
+}
+
 static void
 kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 {
+
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
 
    kk_flush_gfx_state(cmd);
@@ -2067,6 +2147,19 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    data->restart_index = dyn->ia.primitive_restart_index;
    data->flatshade_first =
       dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+
+   if (data->predicate_count > 0 &&
+       data->predicate_op[0] == KK_PREDICATE_GT_DRAW_ID &&
+       kk_icb_draw(cmd, data))
+      return;
+
+   if (unlikely(kk_tl_draw_counters)) {
+      p_atomic_add(&kk_tl_draw_counters[0], data->draw_count);
+      if (data->predicate_count && data->predicate_op[0] == KK_PREDICATE_GT_DRAW_ID) {
+         p_atomic_inc(&kk_tl_draw_counters[1]);
+         p_atomic_add(&kk_tl_draw_counters[2], data->draw_count);
+      }
+   }
 
    /* Convert to indirect and process predicates. Skip draw if we fail. */
    if (data->predicate_count > 0 && !kk_predicate_draws(cmd, data))

@@ -69,4 +69,10 @@ mtl_buffer *mtl_new_buffer_with_bytes_no_copy(mtl_device *device, void *ptr,
 mtl_command_allocator *mtl_new_command_allocator(mtl_device *device);
 mtl_command_buffer *mtl_new_command_buffer(mtl_device *device);
 
+/* An indirect command buffer of draws and indexed draws that inherit the
+ * encoder's pipeline and bindings; *resource_id is its gpuResourceID */
+mtl_indirect_command_buffer *
+mtl_new_indirect_command_buffer(mtl_device *dev, uint32_t max_count,
+                                uint64_t *resource_id);
+
 #endif /* MTL_DEVICE_H */

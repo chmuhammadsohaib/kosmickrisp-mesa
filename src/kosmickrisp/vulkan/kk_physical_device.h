@@ -86,6 +86,11 @@ struct kk_env_settings {
    /* KK_SHADER_CLOCK=0: the shader clock is a per-invocation counter whose
     * low bits never change (the old behaviour) instead of a device-wide one */
    bool shader_clock;
+   /* KK_ICB_DRAWS=0: indirect-count draws as one Metal draw per possible
+    * draw (the old path) instead of GPU-built draws (kk_icb.h) */
+   bool icb_draws;
+   /* KK_ICB_DRAWS_MAX=n: only calls of at most n possible draws (bisecting) */
+   uint32_t icb_draws_max;
 };
 
 struct kk_physical_device {

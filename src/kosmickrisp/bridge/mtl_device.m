@@ -13,6 +13,7 @@
 #include <Metal/MTL4Counters.h>
 #include <Metal/MTLCaptureManager.h>
 #include <Metal/MTLDevice.h>
+#include <Metal/MTLIndirectCommandBuffer.h>
 
 /* Device creation */
 mtl_device *
@@ -356,5 +357,27 @@ mtl_new_command_buffer(mtl_device *device)
    @autoreleasepool {
       id<MTLDevice> dev = (id<MTLDevice>)device;
       return [dev newCommandBuffer];
+   }
+}
+
+mtl_indirect_command_buffer *
+mtl_new_indirect_command_buffer(mtl_device *dev, uint32_t max_count,
+                                uint64_t *resource_id)
+{
+   @autoreleasepool {
+      id<MTLDevice> device = (id<MTLDevice>)dev;
+      MTLIndirectCommandBufferDescriptor *desc =
+         [[MTLIndirectCommandBufferDescriptor new] autorelease];
+      desc.commandTypes =
+         MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
+      desc.inheritPipelineState = YES;
+      desc.inheritBuffers = YES;
+      id<MTLIndirectCommandBuffer> icb =
+         [device newIndirectCommandBufferWithDescriptor:desc
+                                        maxCommandCount:max_count
+                                                options:MTLResourceStorageModePrivate];
+      if (icb)
+         *resource_id = icb.gpuResourceID._impl;
+      return icb;
    }
 }

@@ -54,6 +54,7 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
       kk_destroy_bo(dev, *bo);
    }
    util_dynarray_clear(&cmd->large_bos);
+   kk_icb_cmd_release(dev, &cmd->icb);
    util_dynarray_foreach(&cmd->rt_stacks, struct kk_bo *, bo)
       kk_rt_stack_release(dev, *bo);
    util_dynarray_clear(&cmd->rt_stacks);
@@ -113,6 +114,7 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
 
    kk_cmd_release_resources(dev, cmd);
    util_dynarray_fini(&cmd->large_bos);
+   util_dynarray_fini(&cmd->icb.chunks);
    util_dynarray_fini(&cmd->rt_stacks);
    util_dynarray_fini(&cmd->post_render_writes);
    util_dynarray_fini(&cmd->ts_resolves);

@@ -411,6 +411,9 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
       memset(dev->atomic64_locks->cpu, 0, KK_ATOMIC64_LOCK_COUNT * 4u);
    }
 
+   kk_tl_init_device(dev);
+   kk_icb_device_init(dev);
+
    if (pdev->settings.shader_clock) {
       result = kk_alloc_bo(dev, &dev->vk.base, 64u, 0, &dev->clock_counter);
       if (result != VK_SUCCESS)
@@ -514,6 +517,7 @@ fail_vab_memory:
       kk_destroy_bo(dev, dev->atomic64_locks);
    if (dev->clock_counter)
       kk_destroy_bo(dev, dev->clock_counter);
+   kk_icb_device_finish(dev);
    kk_mfx_finish(dev);
    kk_device_finish_rt(dev);
    kk_device_finish_rt_stacks(dev);
@@ -568,6 +572,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       kk_destroy_bo(dev, dev->atomic64_locks);
    if (dev->clock_counter)
       kk_destroy_bo(dev, dev->clock_counter);
+   kk_icb_device_finish(dev);
 
    /* Geometry heap */
    if (dev->heap)
@@ -655,6 +660,27 @@ kk_device_remove_heap_from_residency_set(struct kk_device *dev, mtl_heap *heap)
    dev->residency_set.dirty = true;
    simple_mtx_unlock(&dev->residency_set.mutex);
    KK_RT_STATS_ADD(dev, KK_RT_STAT_RESIDENCY_REMOVES, 1);
+}
+
+void
+kk_device_add_allocation_to_residency_set(struct kk_device *dev,
+                                          void *allocation)
+{
+   simple_mtx_lock(&dev->residency_set.mutex);
+   mtl_residency_set_add_allocation(dev->residency_set.handle, allocation);
+   dev->residency_set.dirty = true;
+   simple_mtx_unlock(&dev->residency_set.mutex);
+   KK_RT_STATS_ADD(dev, KK_RT_STAT_RESIDENCY_ADDS, 1);
+}
+
+void
+kk_device_remove_allocation_from_residency_set(struct kk_device *dev,
+                                               void *allocation)
+{
+   simple_mtx_lock(&dev->residency_set.mutex);
+   mtl_residency_set_remove_allocation(dev->residency_set.handle, allocation);
+   dev->residency_set.dirty = true;
+   simple_mtx_unlock(&dev->residency_set.mutex);
 }
 
 void

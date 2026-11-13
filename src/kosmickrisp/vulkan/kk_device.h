@@ -10,6 +10,7 @@
 
 #include "kk_private.h"
 
+#include "kk_icb.h"
 #include "kk_mfx.h"
 #include "kk_query_table.h"
 #include "kk_queue.h"
@@ -175,6 +176,7 @@ struct kk_device {
    /* KK_ATOMIC64_EMULATION: 32-bit locks, zeroed (kk_nir_lower_atomic64) */
    struct kk_bo *atomic64_locks;
    struct kk_bo *clock_counter;
+   struct kk_icb_device icb;
 
    /* Geomtry heap */
    struct kk_bo *heap;
@@ -196,6 +198,11 @@ void kk_device_finish_lib(struct kk_device *dev);
 void kk_device_add_heap_to_residency_set(struct kk_device *dev, mtl_heap *heap);
 void kk_device_remove_heap_from_residency_set(struct kk_device *dev,
                                               mtl_heap *heap);
+/* Any Metal allocation (an indirect command buffer, ...) */
+void kk_device_add_allocation_to_residency_set(struct kk_device *dev,
+                                               void *allocation);
+void kk_device_remove_allocation_from_residency_set(struct kk_device *dev,
+                                                    void *allocation);
 void kk_device_add_buffer_to_residency_set(struct kk_device *dev,
                                            mtl_buffer *buffer);
 void kk_device_remove_buffer_from_residency_set(struct kk_device *dev,

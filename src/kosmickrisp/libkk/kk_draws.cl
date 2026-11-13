@@ -71,6 +71,20 @@ libkk_predicate_indirect_neq_zero(global uint32_t *out, constant uint32_t *in,
    libkk_predicate_draw(out, in, out_stride_el, in_stride_el, draw_id, enabled);
 }
 
+/*
+ * KK_GPU_TIMELINE: real draw counts of indirect-count draws: total, largest
+ * call, calls (stats[0..2])
+ */
+KERNEL(1)
+libkk_count_draws(global uint32_t *stats, constant uint32_t *value,
+                  uint32_t max_draws)
+{
+   uint32_t n = min(*value, max_draws);
+   atomic_fetch_add((volatile atomic_uint *)&stats[0], n);
+   atomic_fetch_max((volatile atomic_uint *)&stats[1], n);
+   atomic_fetch_add((volatile atomic_uint *)&stats[2], 1u);
+}
+
 KERNEL(1024)
 libkk_unroll_geometry(
    uint64_t index_buffer, global struct poly_heap *heap,

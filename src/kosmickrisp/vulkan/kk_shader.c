@@ -1782,6 +1782,8 @@ kk_compile_graphics_pipeline(struct kk_device *device, struct kk_shader *vs)
 
    mtl_render_pipeline_descriptor *pipeline_descriptor =
       mtl_new_render_pipeline_descriptor();
+   mtl_render_pipeline_descriptor_set_support_indirect_command_buffers(
+      pipeline_descriptor, pdev->settings.icb_draws);
    mtl_render_pipeline_descriptor_set_vertex_shader(pipeline_descriptor,
                                                     vertex_function);
    mtl_render_pipeline_descriptor_set_fragment_shader(pipeline_descriptor,

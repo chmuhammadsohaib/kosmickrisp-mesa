@@ -7,6 +7,7 @@
 #include "mtl_encoder.h"
 
 #include <Metal/MTL4CommandBuffer.h>
+#include <Metal/MTLIndirectCommandBuffer.h>
 #include <Metal/MTL4ComputeCommandEncoder.h>
 #include <Metal/MTL4Counters.h>
 #include <Metal/MTL4RenderCommandEncoder.h>
@@ -544,4 +545,27 @@ void mtl_render_set_stencil_store_action(mtl_render_encoder *encoder,
         id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
         [enc setStencilStoreAction:(MTLStoreAction)action];
     }
+}
+
+void
+mtl_render_execute_commands_indirect(mtl_render_encoder *encoder,
+                                     mtl_indirect_command_buffer *icb,
+                                     uint64_t range_addr)
+{
+   @autoreleasepool {
+      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+      [enc executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb
+                    indirectBuffer:range_addr];
+   }
+}
+
+void
+mtl_render_barrier_vertex_writes(mtl_render_encoder *encoder)
+{
+   @autoreleasepool {
+      id<MTL4RenderCommandEncoder> enc = (id<MTL4RenderCommandEncoder>)encoder;
+      [enc barrierAfterEncoderStages:MTLStageVertex
+                 beforeEncoderStages:MTLStageVertex | MTLStageFragment
+                   visibilityOptions:MTL4VisibilityOptionDevice];
+   }
 }

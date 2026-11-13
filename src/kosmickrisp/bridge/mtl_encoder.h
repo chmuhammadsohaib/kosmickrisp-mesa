@@ -155,4 +155,12 @@ void mtl_render_set_depth_store_action(mtl_render_encoder *encoder,
 void mtl_render_set_stencil_store_action(mtl_render_encoder *encoder,
                                          enum mtl_store_action action);
 
+/* Indirect command buffers (KK_ICB_DRAWS) */
+void mtl_render_execute_commands_indirect(mtl_render_encoder *encoder,
+                                          mtl_indirect_command_buffer *icb,
+                                          uint64_t range_addr);
+/* Vertex-stage device writes earlier in this render pass become visible to
+ * vertex and fragment work after it, including indirect command fetch */
+void mtl_render_barrier_vertex_writes(mtl_render_encoder *encoder);
+
 #endif /* MTL_ENCODER_H */

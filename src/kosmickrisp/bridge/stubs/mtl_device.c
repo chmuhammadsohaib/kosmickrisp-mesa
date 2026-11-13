@@ -168,3 +168,10 @@ mtl_new_command_buffer(mtl_device *device)
 {
    return NULL;
 }
+
+mtl_indirect_command_buffer *
+mtl_new_indirect_command_buffer(mtl_device *dev, uint32_t max_count,
+                                uint64_t *resource_id)
+{
+   return NULL;
+}
