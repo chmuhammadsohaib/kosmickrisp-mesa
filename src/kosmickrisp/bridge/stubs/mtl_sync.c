@@ -34,6 +34,13 @@ mtl_shared_event_wait_until_signaled_value(mtl_shared_event *event_handle,
    return 0;
 }
 
+int
+mtl_shared_events_wait_any(mtl_shared_event **events, const uint64_t *values,
+                           uint32_t count, uint64_t timeout_ms)
+{
+   return -1;
+}
+
 uint64_t
 mtl_shared_event_get_signaled_value(mtl_shared_event *event_handle)
 {

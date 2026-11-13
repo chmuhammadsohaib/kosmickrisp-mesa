@@ -10,6 +10,7 @@
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
+#include "util/stack_array.h"
 #include "util/u_atomic.h"
 
 #include <inttypes.h>
@@ -113,12 +114,52 @@ kk_timeline_wait(struct vk_device *device, struct vk_sync *sync,
    return completed != 0 ? VK_SUCCESS : VK_TIMEOUT;
 }
 
+/* Waits on several timelines; waiting for any sleeps on Metal's notifications
+ * (without this, the common code polls them all in a loop on a CPU core) */
+static VkResult
+kk_timeline_wait_many(struct vk_device *device, uint32_t wait_count,
+                      const struct vk_sync_wait *waits,
+                      enum vk_sync_wait_flags wait_flags,
+                      uint64_t abs_timeout_ns)
+{
+   if (!(wait_flags & VK_SYNC_WAIT_ANY)) {
+      for (uint32_t i = 0; i < wait_count; i++) {
+         VkResult result =
+            kk_timeline_wait(device, waits[i].sync, waits[i].wait_value,
+                             wait_flags, abs_timeout_ns);
+         if (result != VK_SUCCESS)
+            return result;
+      }
+      return VK_SUCCESS;
+   }
+
+   STACK_ARRAY(mtl_shared_event *, events, wait_count);
+   STACK_ARRAY(uint64_t, values, wait_count);
+   for (uint32_t i = 0; i < wait_count; i++) {
+      events[i] =
+         container_of(waits[i].sync, struct kk_sync_timeline, base)->mtl_handle;
+      values[i] = waits[i].wait_value;
+   }
+   uint64_t timeout_ms = UINT64_MAX;
+   if (abs_timeout_ns != OS_TIMEOUT_INFINITE) {
+      const uint64_t now = os_time_get_nano();
+      const uint64_t rel = abs_timeout_ns > now ? abs_timeout_ns - now : 0;
+      timeout_ms = rel / 1000000 + (rel % 1000000 ? 1 : 0);
+   }
+   const int done =
+      mtl_shared_events_wait_any(events, values, wait_count, timeout_ms);
+   STACK_ARRAY_FINISH(events);
+   STACK_ARRAY_FINISH(values);
+   return done >= 0 ? VK_SUCCESS : VK_TIMEOUT;
+}
+
 const struct vk_sync_type kk_sync_type = {
    .size = sizeof(struct kk_sync_timeline),
    .features = VK_SYNC_FEATURE_TIMELINE | VK_SYNC_FEATURE_GPU_WAIT |
                VK_SYNC_FEATURE_CPU_WAIT | VK_SYNC_FEATURE_CPU_SIGNAL |
-               VK_SYNC_FEATURE_WAIT_PENDING |
+               VK_SYNC_FEATURE_WAIT_PENDING | VK_SYNC_FEATURE_WAIT_ANY |
                VK_SYNC_FEATURE_WAIT_BEFORE_SIGNAL,
+   .wait_many = kk_timeline_wait_many,
    .init = kk_timeline_init,
    .finish = kk_timeline_finish,
    .signal = kk_timeline_signal,
@@ -126,7 +167,6 @@ const struct vk_sync_type kk_sync_type = {
    .reset = NULL,
    .move = NULL,
    .wait = kk_timeline_wait,
-   .wait_many = NULL,
    .import_opaque_fd = NULL,
    .export_opaque_fd = NULL,
    .import_sync_file = NULL,

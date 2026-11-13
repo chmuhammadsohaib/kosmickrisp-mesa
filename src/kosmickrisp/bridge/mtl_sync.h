@@ -25,5 +25,10 @@ int mtl_shared_event_wait_until_signaled_value(mtl_shared_event *event_handle,
 uint64_t mtl_shared_event_get_signaled_value(mtl_shared_event *event_handle);
 void mtl_shared_event_set_signaled_value(mtl_shared_event *event_handle,
                                          uint64_t value);
+/* Waits until any of the events reaches its value: the index of one that did,
+ * or -1 on timeout */
+int mtl_shared_events_wait_any(mtl_shared_event **events,
+                               const uint64_t *values, uint32_t count,
+                               uint64_t timeout_ms);
 
 #endif /* MTL_SYNC_H */
