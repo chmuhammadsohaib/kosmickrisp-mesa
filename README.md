@@ -39,6 +39,10 @@ Most additions are opt-in with environment variables, so with none set the drive
 - Less CPU per frame: dynamic depth/stencil states are cached, the residency set is only committed when it changes,
   sparse binds are batched, waits on any of several semaphores sleep instead of polling.
 - MetalFX objects are freed when FSR or DLSS is turned off and when the output resolution changes.
+- Indirect-count draws (`vkCmdDraw*IndirectCount`) are built on the GPU: a pass inside the render pass writes the
+  draws the count asks for into a Metal indirect command buffer, instead of one Metal draw per possible draw and a
+  compute pass that splits the render pass (DOOM: The Dark Ages: ~12k instead of ~400k Metal draws a second at its
+  menu). `KK_ICB_DRAWS=0` keeps the old path.
 - Device-local memory the host can't see is Metal private storage, so render targets and textures there can be
   compressed losslessly (`KK_PRIVATE_DEVICE_LOCAL=0` keeps it shared).
 
