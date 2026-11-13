@@ -145,6 +145,19 @@ kk_AllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
       result = kk_alloc_private_bo(dev, &dev->vk.base, aligned_size, &mem->bo);
       if (result != VK_SUCCESS)
          goto fail_alloc;
+   } else if (pAllocateInfo->memoryTypeIndex ==
+                 kk_device_physical(dev)->device_local_mem_type &&
+              kk_device_physical(dev)->settings.private_device_local) {
+      /* Memory the host can't see: private storage, where Metal can compress
+       * render targets and textures losslessly, which it doesn't do for the
+       * shared storage everything else is in */
+      result = kk_alloc_bo_with_options(
+         dev, &dev->vk.base, aligned_size, alignment,
+         MTL_RESOURCE_STORAGE_MODE_PRIVATE |
+            MTL_RESOURCE_TRACKING_MODE_UNTRACKED,
+         &mem->bo);
+      if (result != VK_SUCCESS)
+         goto fail_alloc;
    } else {
       result =
          kk_alloc_bo(dev, &dev->vk.base, aligned_size, alignment, &mem->bo);

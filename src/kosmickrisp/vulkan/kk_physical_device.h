@@ -72,6 +72,9 @@ struct kk_env_settings {
    /* KK_DEVICE_LOCAL_TYPE=0 drops the regular DEVICE_LOCAL-only memory type
     * (on by default; see kk_physical_device.c) */
    bool device_local_type;
+   /* KK_PRIVATE_DEVICE_LOCAL=0 keeps that type in shared memory instead of
+    * private (on by default; see kk_device_memory.c) */
+   bool private_device_local;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
    /* KK_EXACT=1: no optimization that can change output (e.g. Metal's own
@@ -101,6 +104,8 @@ struct kk_physical_device {
    /* Private memory backing sparse resources, which only they may use; see
     * kk_sparse.c. mem_type_count when there is none. */
    uint8_t private_mem_type;
+   /* The regular DEVICE_LOCAL-only type, UINT8_MAX when there is none */
+   uint8_t device_local_mem_type;
 
    // Emulated binary sync type
    struct vk_sync_binary_type sync_binary_type;

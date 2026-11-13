@@ -1386,6 +1386,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    }
    settings->device_local_type =
       debug_get_bool_option("KK_DEVICE_LOCAL_TYPE", true);
+   settings->private_device_local =
+      debug_get_bool_option("KK_PRIVATE_DEVICE_LOCAL", true);
 
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";
@@ -1508,7 +1510,9 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
     * device memory the host can't see (AMD's FidelityFX runtime refuses
     * host-visible types for it and fails context creation without one) find
     * it. It sits before the host visible type, as its flags are a subset. */
+   pdev->device_local_mem_type = UINT8_MAX;
    if (pdev->settings.device_local_type) {
+      pdev->device_local_mem_type = pdev->mem_type_count;
       pdev->mem_types[pdev->mem_type_count++] = (VkMemoryType){
          .propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
          .heapIndex = sysmem_heap_idx,

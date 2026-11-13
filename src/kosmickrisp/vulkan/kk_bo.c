@@ -23,6 +23,18 @@ VkResult
 kk_alloc_bo(struct kk_device *dev, struct vk_object_base *log_obj,
             uint64_t size_B, uint64_t align_B, struct kk_bo **bo_out)
 {
+   return kk_alloc_bo_with_options(dev, log_obj, size_B, align_B,
+                                   KK_MTL_RESOURCE_OPTIONS, bo_out);
+}
+
+/* A heap of the given storage; private ones have no CPU address (bo->cpu is
+ * NULL) */
+VkResult
+kk_alloc_bo_with_options(struct kk_device *dev, struct vk_object_base *log_obj,
+                         uint64_t size_B, uint64_t align_B,
+                         enum mtl_resource_options options,
+                         struct kk_bo **bo_out)
+{
    VkResult result = VK_SUCCESS;
 
    // TODO_KOSMICKRISP: Probably requires handling the buffer maximum 256MB
@@ -40,8 +52,7 @@ kk_alloc_bo(struct kk_device *dev, struct vk_object_base *log_obj,
 #endif
 
    size_B = align64(size_B, minimum_alignment);
-   mtl_heap *handle =
-      mtl_new_heap(dev->mtl_handle, size_B, KK_MTL_RESOURCE_OPTIONS);
+   mtl_heap *handle = mtl_new_heap(dev->mtl_handle, size_B, options);
    if (handle == NULL) {
       result = vk_errorf(log_obj, VK_ERROR_OUT_OF_DEVICE_MEMORY, "%m");
       goto fail_heap;
