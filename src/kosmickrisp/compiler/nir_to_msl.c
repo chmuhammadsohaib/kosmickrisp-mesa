@@ -150,8 +150,8 @@ emit_local_vars(struct nir_to_msl_ctx *ctx, nir_shader *shader)
       P_IND(ctx,
             "raytracing::intersection_query<raytracing::instancing%s> rq[%u];\n",
             ctx->rq_triangle_data ? ", raytracing::triangle_data" : "",
-            shader->info.ray_queries);
-      P_IND(ctx, "uint rq_flags[%u];\n", shader->info.ray_queries);
+            ctx->rq_slots);
+      P_IND(ctx, "uint rq_flags[%u];\n", ctx->rq_slots);
    }
    if (shader->info.shared_size) {
       P_IND(ctx, "threadgroup char shared_data[%d];\n",
@@ -1165,11 +1165,148 @@ global_access_qualifier(struct nir_to_msl_ctx *ctx,
 #define MSL_RAY_FLAG_SKIP_AABBS             0x200u
 
 static void
+rq_slot_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+{
+   if (ctx->rq_slot) {
+      P(ctx, "%uu", ctx->rq_slot[nir_src_as_uint(instr->src[0])]);
+   } else {
+      src_to_msl(ctx, &instr->src[0]);
+   }
+}
+
+static void
 rq_index_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
 {
    P(ctx, "rq[");
-   src_to_msl(ctx, &instr->src[0]);
+   rq_slot_to_msl(ctx, instr);
    P(ctx, "]");
+}
+
+static bool
+is_rq_intrinsic(const nir_intrinsic_instr *intr)
+{
+   switch (intr->intrinsic) {
+   case nir_intrinsic_rq_initialize:
+   case nir_intrinsic_rq_terminate:
+   case nir_intrinsic_rq_proceed:
+   case nir_intrinsic_rq_generate_intersection:
+   case nir_intrinsic_rq_confirm_intersection:
+   case nir_intrinsic_rq_load:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* The instruction index range a use at this block keeps a query alive over:
+ * the use itself, or the whole outermost loop around it (the query's state
+ * carries over iterations) */
+static void
+rq_live_range(nir_block *block, nir_instr *instr, unsigned *first,
+              unsigned *last)
+{
+   nir_loop *outer = NULL;
+   for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         outer = nir_cf_node_as_loop(node);
+   }
+   if (!outer) {
+      *first = *last = instr->index;
+      return;
+   }
+   *first = UINT_MAX;
+   *last = 0;
+   nir_foreach_block_in_cf_node(b, &outer->cf_node) {
+      nir_foreach_instr(i, b) {
+         *first = MIN2(*first, i->index);
+         *last = MAX2(*last, i->index);
+      }
+   }
+}
+
+/* Queries used one after the other (inlined copies of one trace function)
+ * share a slot: each intersection_query is a large object, and fewer of them
+ * means less per-thread state. Only when every index is a constant and the
+ * shader is one function. */
+static void
+assign_ray_query_slots(struct nir_to_msl_ctx *ctx, nir_shader *shader)
+{
+   const unsigned count = shader->info.ray_queries;
+   ctx->rq_slots = count;
+   ctx->rq_slot = NULL;
+   if (count < 2)
+      return;
+
+   nir_function_impl *entry = nir_shader_get_entrypoint(shader);
+   unsigned impls = 0;
+   nir_foreach_function_impl(impl, shader)
+      impls++;
+   if (impls != 1)
+      return;
+
+   nir_index_instrs(entry);
+   unsigned *first = rzalloc_array(NULL, unsigned, count);
+   unsigned *last = rzalloc_array(NULL, unsigned, count);
+   bool *used = rzalloc_array(NULL, bool, count);
+   bool ok = true;
+   nir_foreach_block(block, entry) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (!is_rq_intrinsic(intr))
+            continue;
+         if (!nir_src_is_const(intr->src[0]) ||
+             nir_src_as_uint(intr->src[0]) >= count) {
+            ok = false;
+            break;
+         }
+         const unsigned q = nir_src_as_uint(intr->src[0]);
+         unsigned lo, hi;
+         rq_live_range(block, instr, &lo, &hi);
+         first[q] = used[q] ? MIN2(first[q], lo) : lo;
+         last[q] = used[q] ? MAX2(last[q], hi) : hi;
+         used[q] = true;
+      }
+      if (!ok)
+         break;
+   }
+
+   if (ok) {
+      /* Greedy by start: a slot is free again once its last query has ended */
+      unsigned *slot = ralloc_array(ctx->text, unsigned, count);
+      unsigned *slot_end = rzalloc_array(NULL, unsigned, count);
+      unsigned slots = 0;
+      for (unsigned n = 0; n < count; n++) {
+         unsigned q = UINT_MAX;
+         for (unsigned i = 0; i < count; i++) {
+            if (used[i] && (q == UINT_MAX || first[i] < first[q]))
+               q = i;
+         }
+         if (q == UINT_MAX)
+            break;
+         used[q] = false;
+         unsigned s = 0;
+         while (s < slots && slot_end[s] >= first[q])
+            s++;
+         if (s == slots)
+            slots++;
+         slot[q] = s;
+         slot_end[s] = last[q];
+      }
+      for (unsigned i = 0; i < count; i++) {
+         if (!used[i] && slot[i] >= slots)
+            slot[i] = 0;
+      }
+      if (slots && slots < count) {
+         ctx->rq_slot = slot;
+         ctx->rq_slots = slots;
+      }
+      ralloc_free(slot_end);
+   }
+   ralloc_free(first);
+   ralloc_free(last);
+   ralloc_free(used);
 }
 
 /* What the shader's ray queries use, see nir_to_msl_ctx */
@@ -1222,7 +1359,7 @@ rq_initialize_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
    src_to_msl(ctx, &instr->src[2]);
    P(ctx, ";\n");
    P_IND(ctx, "rq_flags[");
-   src_to_msl(ctx, &instr->src[0]);
+   rq_slot_to_msl(ctx, instr);
    P(ctx, "] = f;\n");
    if (!ctx->rq_candidates) {
       /* Nothing confirms a candidate triangle or generates an AABB hit, so
@@ -1373,7 +1510,7 @@ rq_load_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       break;
    case nir_ray_query_value_flags:
       P(ctx, "rq_flags[");
-      src_to_msl(ctx, &instr->src[0]);
+      rq_slot_to_msl(ctx, instr);
       P(ctx, "]");
       break;
    case nir_ray_query_value_world_ray_direction:
@@ -3213,6 +3350,7 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    msl_gather_info(&ctx, options);
    scan_ray_queries(&ctx, shader);
+   assign_ray_query_slots(&ctx, shader);
 
    P(&ctx, "// Generated by Mesa compiler\n");
    if (shader->info.stage == MESA_SHADER_COMPUTE ||

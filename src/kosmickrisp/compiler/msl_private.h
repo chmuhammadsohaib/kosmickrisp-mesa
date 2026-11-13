@@ -31,6 +31,10 @@ struct nir_to_msl_ctx {
     * candidates that can't commit without the shader are culled) */
    bool rq_triangle_data;
    bool rq_candidates;
+   /* Ray query slots: queries whose lives don't overlap share one (rq_slot is
+    * indexed by the query index, NULL when not remapped) */
+   unsigned rq_slots;
+   unsigned *rq_slot;
    /* SSA values declared where they're defined instead of at function scope,
     * see predeclare_ssa_values */
    BITSET_WORD *scoped_defs;
