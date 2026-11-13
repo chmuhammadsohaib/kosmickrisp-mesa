@@ -306,7 +306,13 @@ kk_mfx_get_scaler(struct kk_device *dev,
          simple_mtx_unlock(&dev->mfx.mutex);
          return scaler;
       }
-      if (scaler->last_used + KK_MFX_IDLE_UPSCALES < upscale) {
+      /* Idle for a while, or for another output: the output resolution or
+       * format changed, and a scaler (hundreds of MB at 4K) for the old one
+       * is only wanted again if it changes back */
+      const bool other_output = scaler->desc.output_width != desc->output_width ||
+                                scaler->desc.output_height != desc->output_height ||
+                                scaler->desc.output_format != desc->output_format;
+      if (scaler->last_used + KK_MFX_IDLE_UPSCALES < upscale || other_output) {
          list_del(&scaler->link);
          scaler->release_after = upscale + KK_MFX_RELEASE_DELAY;
          scaler->retired_ns = os_time_get_nano();
