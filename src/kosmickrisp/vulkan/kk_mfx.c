@@ -17,6 +17,8 @@
 
 #include "kk_mfx.h"
 
+#include "util/os_time.h"
+
 #include "kk_cmd_buffer.h"
 #include "kk_device.h"
 #include "kk_image.h"
@@ -42,8 +44,10 @@ struct kk_mfx_scaler {
    struct mtl_fx_temporal_scaler_desc desc;
    mtl_fx_temporal_scaler *handle;
    mtl_texture *output;
-   /* Once retired: the upscale count after which nothing in flight uses it */
+   /* Once retired: the upscale count after which nothing in flight uses it,
+    * and when it was retired (kk_mfx_releasable) */
    uint64_t release_after;
+   int64_t retired_ns;
    /* The upscale count when it was last used */
    uint64_t last_used;
 };
@@ -58,6 +62,17 @@ struct kk_mfx_scaler {
 #define KK_MFX_MAX_SCALERS 2
 #define KK_MFX_RELEASE_DELAY 16
 #define KK_MFX_IDLE_UPSCALES 900
+/* A count alone isn't enough: a game can upscale or interpolate several times a
+ * frame (two contexts, split views), so a retired object also waits this long,
+ * far more than any frame in flight takes */
+#define KK_MFX_RELEASE_NS (500 * 1000 * 1000)
+
+static bool
+kk_mfx_releasable(uint64_t release_after, int64_t retired_ns, uint64_t count)
+{
+   return release_after <= count &&
+          os_time_get_nano() - retired_ns >= KK_MFX_RELEASE_NS;
+}
 
 static void
 kk_mfx_release_scaler(struct kk_device *dev, struct kk_mfx_scaler *scaler)
@@ -131,8 +146,9 @@ struct kk_mfx_interpolator {
    mtl_texture *prev_color;
    bool has_prev_color;
    /* Once retired: the interpolation count after which nothing in flight
-    * uses it */
+    * uses it, and when it was retired (kk_mfx_releasable) */
    uint64_t release_after;
+   int64_t retired_ns;
 };
 
 static uint64_t kk_mfx_interpolate_count;
@@ -185,6 +201,53 @@ kk_mfx_init(struct kk_device *dev)
              &kk_mfx_signs.motion_y);
 }
 
+/* Releases the scalers and interpolators (a few hundred MB at 4K) once the last
+ * channel module goes: kk-ffx and kk-ngx destroy theirs when a game turns FSR or
+ * DLSS off or recreates its contexts. Nothing recorded may use them any more, so
+ * the device is waited on first; this is rare. */
+void
+kk_mfx_module_created(struct kk_device *dev)
+{
+   simple_mtx_lock(&dev->mfx.mutex);
+   dev->mfx.modules++;
+   simple_mtx_unlock(&dev->mfx.mutex);
+}
+
+void
+kk_mfx_module_destroyed(struct kk_device *dev)
+{
+   simple_mtx_lock(&dev->mfx.mutex);
+   const bool last = --dev->mfx.modules == 0;
+   simple_mtx_unlock(&dev->mfx.mutex);
+   if (!last)
+      return;
+
+   dev->vk.dispatch_table.DeviceWaitIdle(kk_device_to_handle(dev));
+
+   simple_mtx_lock(&dev->mfx.mutex);
+   if (dev->mfx.modules == 0) {
+      list_for_each_entry_safe(struct kk_mfx_scaler, scaler,
+                               &dev->mfx.scalers, link)
+         kk_mfx_release_scaler(dev, scaler);
+      list_for_each_entry_safe(struct kk_mfx_scaler, scaler,
+                               &dev->mfx.retired, link)
+         kk_mfx_release_scaler(dev, scaler);
+      list_inithead(&dev->mfx.scalers);
+      list_inithead(&dev->mfx.retired);
+      dev->mfx.scaler_count = 0;
+      dev->mfx.last_scaler = NULL;
+      dev->mfx.last_output = NULL;
+      if (dev->mfx.interpolator)
+         kk_mfx_release_interpolator(dev, dev->mfx.interpolator);
+      dev->mfx.interpolator = NULL;
+      list_for_each_entry_safe(struct kk_mfx_interpolator, interpolator,
+                               &dev->mfx.retired_interpolators, link)
+         kk_mfx_release_interpolator(dev, interpolator);
+      list_inithead(&dev->mfx.retired_interpolators);
+   }
+   simple_mtx_unlock(&dev->mfx.mutex);
+}
+
 void
 kk_mfx_finish(struct kk_device *dev)
 {
@@ -227,7 +290,8 @@ kk_mfx_get_scaler(struct kk_device *dev,
    const uint64_t upscale = ++dev->mfx.upscale_count;
    list_for_each_entry_safe(struct kk_mfx_scaler, retired, &dev->mfx.retired,
                             link) {
-      if (retired->release_after <= upscale) {
+      if (kk_mfx_releasable(retired->release_after, retired->retired_ns,
+                            upscale)) {
          list_del(&retired->link);
          kk_mfx_release_scaler(dev, retired);
       }
@@ -245,6 +309,7 @@ kk_mfx_get_scaler(struct kk_device *dev,
       if (scaler->last_used + KK_MFX_IDLE_UPSCALES < upscale) {
          list_del(&scaler->link);
          scaler->release_after = upscale + KK_MFX_RELEASE_DELAY;
+         scaler->retired_ns = os_time_get_nano();
          list_add(&scaler->link, &dev->mfx.retired);
          dev->mfx.scaler_count--;
          if (dev->mfx.last_scaler == scaler)
@@ -276,6 +341,7 @@ kk_mfx_get_scaler(struct kk_device *dev,
             list_last_entry(&dev->mfx.scalers, struct kk_mfx_scaler, link);
          list_del(&oldest->link);
          oldest->release_after = upscale + KK_MFX_RELEASE_DELAY;
+         oldest->retired_ns = os_time_get_nano();
          list_add(&oldest->link, &dev->mfx.retired);
          dev->mfx.scaler_count--;
          if (dev->mfx.last_scaler == oldest)
@@ -576,7 +642,8 @@ kk_mfx_get_interpolator(struct kk_device *dev,
    const uint64_t count = ++kk_mfx_interpolate_count;
    list_for_each_entry_safe(struct kk_mfx_interpolator, retired,
                             &dev->mfx.retired_interpolators, link) {
-      if (retired->release_after <= count) {
+      if (kk_mfx_releasable(retired->release_after, retired->retired_ns,
+                            count)) {
          list_del(&retired->link);
          kk_mfx_release_interpolator(dev, retired);
       }
@@ -613,6 +680,7 @@ kk_mfx_get_interpolator(struct kk_device *dev,
 
    if (current) {
       current->release_after = count + KK_MFX_RELEASE_DELAY;
+      current->retired_ns = os_time_get_nano();
       list_add(&current->link, &dev->mfx.retired_interpolators);
    }
    dev->mfx.interpolator = interpolator;
@@ -767,7 +835,14 @@ kk_mfx_cmd_interpolate(struct kk_cmd_buffer *cmd,
    struct kk_image_view *real_view =
       params->output_real ? kk_mfx_view_from_handle(dev, params->output_real)
                           : NULL;
-   if (real_view && real_view != views[0]) {
+   /* Not when the real frame is already where the output goes (another view of
+    * the same image): copying a texture onto itself is undefined in Metal */
+   if (real_view &&
+       (real_view->vk.image != views[0]->vk.image ||
+        real_view->vk.base_array_layer != views[0]->vk.base_array_layer ||
+        real_view->vk.base_mip_level != views[0]->vk.base_mip_level ||
+        params->color_x != params->output_x ||
+        params->color_y != params->output_y)) {
       struct kk_image *real_image =
          container_of(real_view->vk.image, struct kk_image, vk);
       mtl_copy_from_texture_to_texture(

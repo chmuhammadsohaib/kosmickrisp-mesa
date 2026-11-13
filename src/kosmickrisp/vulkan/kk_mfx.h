@@ -42,10 +42,14 @@ struct kk_mfx_state {
    struct kk_mfx_interpolator *interpolator;
    /* Interpolators replaced while recorded work may still use them */
    struct list_head retired_interpolators;
+   /* Live channel modules (VkCuModuleNVX); everything above goes with the last */
+   uint32_t modules;
 };
 
 void kk_mfx_init(struct kk_device *dev);
 void kk_mfx_finish(struct kk_device *dev);
+void kk_mfx_module_created(struct kk_device *dev);
+void kk_mfx_module_destroyed(struct kk_device *dev);
 
 /* Resolves a VK_NVX_image_view_handle 64-bit handle, NULL if it isn't one of
  * this device's image views */

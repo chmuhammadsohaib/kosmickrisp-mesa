@@ -66,6 +66,7 @@ kk_CreateCuModuleNVX(VkDevice device,
    if (!module)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
+   kk_mfx_module_created(dev);
    *pModule = kk_cu_module_to_handle(module);
    return VK_SUCCESS;
 }
@@ -77,8 +78,10 @@ kk_DestroyCuModuleNVX(VkDevice device, VkCuModuleNVX _module,
    VK_FROM_HANDLE(kk_device, dev, device);
    VK_FROM_HANDLE(kk_cu_module, module, _module);
 
-   if (module)
+   if (module) {
       vk_object_free(&dev->vk, pAllocator, module);
+      kk_mfx_module_destroyed(dev);
+   }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -180,6 +183,16 @@ kk_GetImageViewHandle64NVX(VkDevice device,
                            const VkImageViewHandleInfoNVX *pInfo)
 {
    return (uint64_t)(uintptr_t)kk_image_view_from_handle(pInfo->imageView);
+}
+
+/* The channel takes image views only (kk_mfx samples them itself), so the
+ * combined index is the view's */
+VKAPI_ATTR uint64_t VKAPI_CALL
+kk_GetDeviceCombinedImageSamplerIndexNVX(VkDevice device,
+                                         uint64_t imageViewIndex,
+                                         uint64_t samplerIndex)
+{
+   return imageViewIndex;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
