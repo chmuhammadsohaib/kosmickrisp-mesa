@@ -74,6 +74,9 @@ struct kk_env_settings {
    bool device_local_type;
    const char *gpu_capture_dir;
    uint64_t disabled_workarounds;
+   /* KK_EXACT=1: no optimization that can change output (e.g. Metal's own
+    * order for subgroup float sums); off by default */
+   bool exact_output;
 };
 
 struct kk_physical_device {

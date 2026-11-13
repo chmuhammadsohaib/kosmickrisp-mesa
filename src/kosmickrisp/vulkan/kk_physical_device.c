@@ -1223,7 +1223,8 @@ kk_physical_device_compiler_flags(const struct kk_physical_device *pdev)
    return (uint64_t)pdev->settings.experimental_enabled |
           (uint64_t)pdev->settings.ray_tracing_enabled << 1 |
           (uint64_t)pdev->settings.sparse_enabled << 2 |
-          (uint64_t)pdev->settings.nvx_enabled << 3;
+          (uint64_t)pdev->settings.nvx_enabled << 3 |
+          (uint64_t)pdev->settings.exact_output << 4;
 }
 
 static void
@@ -1373,6 +1374,7 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
       debug_get_bool_option("KK_RAY_TRACING", false);
    settings->sparse_enabled = debug_get_bool_option("KK_SPARSE", false);
    settings->nvx_enabled = debug_get_bool_option("KK_NVX", false);
+   settings->exact_output = debug_get_bool_option("KK_EXACT", false);
    settings->queue_count =
       CLAMP(debug_get_num_option("KK_QUEUE_COUNT", 1), 1, KK_MAX_MAIN_QUEUES);
    const char *compute = debug_get_option("KK_COMPUTE_QUEUES", "");
