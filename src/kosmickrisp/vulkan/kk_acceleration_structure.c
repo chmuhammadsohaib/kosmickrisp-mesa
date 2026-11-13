@@ -441,7 +441,8 @@ kk_as_fill_desc(const VkAccelerationStructureBuildGeometryInfoKHR *info,
          info->geometryCount ? (ranges ? ranges[0].primitiveCount
                                        : max_counts[0])
                              : 0;
-      if (ranges && desc->instance_count)
+      /* Even with no instances: Metal wants a real buffer, and reads none */
+      if (ranges)
          desc->instance_addr = info->scratchData.deviceAddress;
       return;
    }
