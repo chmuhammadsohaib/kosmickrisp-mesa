@@ -62,6 +62,10 @@ struct kk_root_descriptor_table {
 
    /* Start index in dynamic_buffers where each set starts */
    uint8_t set_dynamic_buffer_start[KK_MAX_SETS];
+
+   /* KK_ATOMIC64_EMULATION: the device's lock table (kk_nir_lower_atomic64),
+    * 0 without it. Last, so the fields above keep their offsets. */
+   uint64_t lock_table_addr __attribute__((aligned(8)));
 };
 
 struct kk_descriptor_state {

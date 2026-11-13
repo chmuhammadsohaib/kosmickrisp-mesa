@@ -1425,7 +1425,9 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
       desc->root_dirty = true;
    }
 
-   if (desc->root_dirty)
+   /* Also when nothing was ever bound: shaders still read the root (the lock
+    * table, KK_ATOMIC64_EMULATION) */
+   if (desc->root_dirty || !desc->root.addr)
       kk_upload_descriptor_root(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
 
    if (desc->root.addr) {

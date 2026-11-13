@@ -144,6 +144,15 @@ emit_local_vars(struct nir_to_msl_ctx *ctx, nir_shader *shader)
          P_IND(ctx,
                "uint gl_SubGroupInvocation = simd_prefix_exclusive_sum(1u);\n");
    }
+   if (mesa_shader_stage_is_rt(shader->info.stage)) {
+      /* Ray tracing stages are functions the dispatch kernel calls, without
+       * entry point attributes: the lane comes in the call record */
+      if (BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_SUBGROUP_SIZE))
+         P_IND(ctx, "uint gl_SubGroupSize = 32u;\n");
+      if (BITSET_TEST(shader->info.system_values_read,
+                      SYSTEM_VALUE_SUBGROUP_INVOCATION))
+         P_IND(ctx, "uint gl_SubGroupInvocation = call->lane;\n");
+   }
    if (shader->info.ray_queries) {
       /* See msl_nir_lower_ray_queries. rq_flags keeps each query's ray flags,
        * which Metal can't return. */
@@ -994,10 +1003,170 @@ atomic_op_to_msl(nir_atomic_op op)
    }
 }
 
+/* 64-bit buffer atomics Metal lacks (it only has max/min, without returning
+ * the old value) go through kk_atomic64_rmw: a lock from a driver lock table,
+ * hashed by address, held for one read-modify-write. The loop repeats only
+ * while some lane of the SIMD group isn't done, so a lane holding a lock always
+ * finishes in the iteration it took it (lanes spinning on a lock held by a
+ * masked-off lane would hang). The new value is written with one native 64-bit
+ * max or min, so plain 64-bit reads never see half of it. The value is read
+ * with fetch_or 0, the lock word too: relaxed atomic loads can come from a
+ * core's cache, older than the 64-bit write-back, and a waiter could keep seeing
+ * a released lock as held.
+ *
+ * kk_atomic64_combine is for add/and/or/xor whose old value isn't used: when
+ * every active lane of the SIMD group targets one address (counters), the lanes
+ * combine their operands and one of them does the locked operation, instead of
+ * 32 waiting on one lock. */
+static const char kk_atomic64_helper[] =
+   "static inline ulong kk_atomic64_rmw(device ulong *p, device atomic_uint *locks, uint op, ulong a, ulong cmp)\n"
+   "{\n"
+   "    ulong addr = (ulong)p;\n"
+   "    uint x = (uint(addr >> 3) ^ uint(addr >> 35)) * 0x9E3779B1u;\n"
+   "    device atomic_uint *lk = &locks[x >> 16];\n"
+   "    device atomic_uint *w = (device atomic_uint *)p;\n"
+   "    bool done = false;\n"
+   "    ulong old = 0;\n"
+   "    do {\n"
+   "        if (!done) {\n"
+   "            uint s = atomic_fetch_or_explicit(lk, 0u, memory_order_relaxed);\n"
+   "            if ((s & 1u) == 0u && atomic_compare_exchange_weak_explicit(lk, &s, s + 1u, memory_order_relaxed, memory_order_relaxed)) {\n"
+   "                atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n"
+   "                uint lo = atomic_fetch_or_explicit(&w[0], 0u, memory_order_relaxed);\n"
+   "                uint hi = atomic_fetch_or_explicit(&w[1], 0u, memory_order_relaxed);\n"
+   "                old = as_type<ulong>(uint2(lo, hi));\n"
+   "                ulong nv;\n"
+   "                switch (op) {\n"
+   "                case 0u: nv = a; break;\n"
+   "                case 1u: nv = old == cmp ? a : old; break;\n"
+   "                case 2u: nv = old + a; break;\n"
+   "                case 3u: nv = old & a; break;\n"
+   "                case 4u: nv = old | a; break;\n"
+   "                case 5u: nv = old ^ a; break;\n"
+   "                case 6u: nv = as_type<ulong>(min(as_type<long>(old), as_type<long>(a))); break;\n"
+   "                case 7u: nv = as_type<ulong>(max(as_type<long>(old), as_type<long>(a))); break;\n"
+   "                case 8u: nv = min(old, a); break;\n"
+   "                default: nv = max(old, a); break;\n"
+   "                }\n"
+   "                if (nv > old)\n"
+   "                    atomic_max_explicit((device atomic_ulong *)p, nv, memory_order_relaxed);\n"
+   "                else if (nv < old)\n"
+   "                    atomic_min_explicit((device atomic_ulong *)p, nv, memory_order_relaxed);\n"
+   "                atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n"
+   "                atomic_store_explicit(lk, s + 2u, memory_order_relaxed);\n"
+   "                done = true;\n"
+   "            }\n"
+   "        }\n"
+   "    } while (simd_any(!done));\n"
+   "    return old;\n"
+   "}\n\n"
+   "static inline ulong kk_simd_combine64(uint op, ulong v)\n"
+   "{\n"
+   "    for (ushort d = 16; d > 0; d >>= 1) {\n"
+   "        uint2 h = as_type<uint2>(v);\n"
+   "        ulong o = as_type<ulong>(uint2(simd_shuffle_xor(h.x, d), simd_shuffle_xor(h.y, d)));\n"
+   "        v = op == 2u ? v + o : op == 3u ? (v & o) : op == 4u ? (v | o) : (v ^ o);\n"
+   "    }\n"
+   "    return v;\n"
+   "}\n\n"
+   "static inline void kk_atomic64_combine(device ulong *p, device atomic_uint *locks, uint op, ulong a)\n"
+   "{\n"
+   "    ulong addr = (ulong)p;\n"
+   "    uint2 first = uint2(simd_broadcast_first(uint(addr)), simd_broadcast_first(uint(addr >> 32)));\n"
+   "    /* Shuffles read every lane, so only with all 32 active */\n"
+   "    bool full = ((ulong)simd_active_threads_mask()) == 0xFFFFFFFFul;\n"
+   "    if (full && simd_all(addr == as_type<ulong>(first))) {\n"
+   "        ulong v = kk_simd_combine64(op, a);\n"
+   "        if (simd_is_first())\n"
+   "            kk_atomic64_rmw(p, locks, op, v, 0ul);\n"
+   "    } else {\n"
+   "        kk_atomic64_rmw(p, locks, op, a, 0ul);\n"
+   "    }\n"
+   "}\n\n";
+
+static bool
+atomic64_emulated(const struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
+                  bool shared)
+{
+   return ctx->atomic64_lock_table_offset && !shared &&
+          instr->def.bit_size == 64;
+}
+
+static unsigned
+atomic64_op_code(nir_atomic_op op)
+{
+   switch (op) {
+   case nir_atomic_op_xchg: return 0;
+   case nir_atomic_op_cmpxchg: return 1;
+   case nir_atomic_op_iadd: return 2;
+   case nir_atomic_op_iand: return 3;
+   case nir_atomic_op_ior: return 4;
+   case nir_atomic_op_ixor: return 5;
+   case nir_atomic_op_imin: return 6;
+   case nir_atomic_op_imax: return 7;
+   case nir_atomic_op_umin: return 8;
+   case nir_atomic_op_umax: return 9;
+   default: UNREACHABLE("Unhandled 64-bit atomic op");
+   }
+}
+
+/* kk_atomic64_rmw(address, the lock table from the root table, op, ...) */
+static void
+atomic64_call_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
+                     nir_src *operand, nir_src *cmp)
+{
+   const char *type = msl_type_for_def(ctx->types, &instr->def);
+   P(ctx, "as_type<%s>(kk_atomic64_rmw((device ulong *)(", type);
+   src_to_msl(ctx, &instr->src[0]);
+   P(ctx, "), (device atomic_uint *)(*(constant ulong *)((constant char *)&buf0 + %u)), %uu, as_type<ulong>(",
+     ctx->atomic64_lock_table_offset,
+     atomic64_op_code(nir_intrinsic_atomic_op(instr)));
+   src_to_msl(ctx, operand);
+   P(ctx, "), ");
+   if (cmp) {
+      P(ctx, "as_type<ulong>(");
+      src_to_msl(ctx, cmp);
+      P(ctx, ")");
+   } else {
+      P(ctx, "0ul");
+   }
+   P(ctx, "))");
+}
+
 static void
 atomic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
               const char *scope, bool shared)
 {
+   if (atomic64_emulated(ctx, instr, shared)) {
+      const nir_atomic_op op = nir_intrinsic_atomic_op(instr);
+      if ((op == nir_atomic_op_umax || op == nir_atomic_op_umin) &&
+          nir_def_is_unused(&instr->def)) {
+         /* Metal has these natively when the old value isn't needed (64-bit
+          * depth-and-id visibility buffers): no lock */
+         P(ctx, "(%s_explicit((device atomic_ulong *)(",
+           op == nir_atomic_op_umax ? "atomic_max" : "atomic_min");
+         src_to_msl(ctx, &instr->src[0]);
+         P(ctx, "), as_type<ulong>(");
+         src_to_msl(ctx, &instr->src[1]);
+         P(ctx, "), memory_order_relaxed), 0ul);\n");
+         return;
+      }
+      if ((op == nir_atomic_op_iadd || op == nir_atomic_op_iand ||
+           op == nir_atomic_op_ior || op == nir_atomic_op_ixor) &&
+          nir_def_is_unused(&instr->def)) {
+         P(ctx, "(kk_atomic64_combine((device ulong *)(");
+         src_to_msl(ctx, &instr->src[0]);
+         P(ctx, "), (device atomic_uint *)(*(constant ulong *)((constant char *)&buf0 + %u)), %uu, as_type<ulong>(",
+           ctx->atomic64_lock_table_offset, atomic64_op_code(op));
+         src_to_msl(ctx, &instr->src[1]);
+         P(ctx, ")), 0ul);\n");
+         return;
+      }
+      atomic64_call_to_msl(ctx, instr, &instr->src[1], NULL);
+      P(ctx, ";\n");
+      return;
+   }
+
    const char *atomic_op = atomic_op_to_msl(nir_intrinsic_atomic_op(instr));
    const char *mem_order = "memory_order_relaxed";
 
@@ -1022,9 +1191,19 @@ atomic_swap_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
    const char *mem_order = "memory_order_relaxed";
    const char *type = msl_type_for_def(ctx->types, &instr->def);
 
+   if (atomic64_emulated(ctx, instr, shared)) {
+      P_IND(ctx, "%s t%d = ", type, instr->def.index);
+      atomic64_call_to_msl(ctx, instr, &instr->src[2], &instr->src[1]);
+      P(ctx, ";\n");
+      return;
+   }
+
+   /* Metal only has the weak compare-exchange, which may fail spuriously and
+    * then leaves the expected value in place, which reads as success: retry
+    * while it still holds the expected value, so a failure is a real one. */
    P_IND(ctx, "%s ta%d = ", type, instr->def.index);
    src_to_msl(ctx, &instr->src[1]);
-   P(ctx, "; %s_explicit((%s atomic_%s*)", atomic_op, scope, type);
+   P(ctx, "; while (!%s_explicit((%s atomic_%s*)", atomic_op, scope, type);
    if (shared)
       P(ctx, "&shared_data[%u + ", nir_intrinsic_base(instr));
    src_to_msl(ctx, &instr->src[0]);
@@ -1033,7 +1212,9 @@ atomic_swap_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
    P(ctx, ", ");
    P(ctx, "&ta%d, ", instr->def.index);
    src_to_msl(ctx, &instr->src[2]);
-   P(ctx, ", %s, %s);", mem_order, mem_order);
+   P(ctx, ", %s, %s) && ta%d == ", mem_order, mem_order, instr->def.index);
+   src_to_msl(ctx, &instr->src[1]);
+   P(ctx, ") {}");
    P(ctx, "%s t%d = ta%d;\n", type, instr->def.index, instr->def.index);
 }
 
@@ -1315,6 +1496,29 @@ scan_ray_queries(struct nir_to_msl_ctx *ctx, nir_shader *shader)
 {
    ctx->rq_triangle_data = false;
    ctx->rq_candidates = false;
+   /* The count comes from the instructions: info.ray_queries can be lost on
+    * the way (ray tracing stages drop the placeholder variable that
+    * msl_nir_lower_ray_queries keeps for it), which left rq[] undeclared */
+   unsigned count = 0;
+   bool dynamic_index = false;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (!is_rq_intrinsic(intr))
+               continue;
+            if (nir_src_is_const(intr->src[0]))
+               count = MAX2(count, nir_src_as_uint(intr->src[0]) + 1);
+            else
+               dynamic_index = true;
+         }
+      }
+   }
+   if (dynamic_index)
+      count = MAX2(count, shader->info.ray_queries);
+   shader->info.ray_queries = MAX2(count, dynamic_index ? 1u : 0u);
    if (!shader->info.ray_queries)
       return;
    nir_foreach_function_impl(impl, shader) {
@@ -3334,6 +3538,25 @@ rt_emit_entry_start(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
          rt_out_size(impl));
 }
 
+static bool
+uses_global_atomic64(nir_shader *shader)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if ((intr->intrinsic == nir_intrinsic_global_atomic ||
+                 intr->intrinsic == nir_intrinsic_global_atomic_swap) &&
+                intr->def.bit_size == 64)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 char *
 nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
 {
@@ -3346,6 +3569,7 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
       .shader = shader,
       .text = _mesa_string_buffer_create(options->mem_ctx, 1024),
       .disabled_workarounds = options->disabled_workarounds,
+      .atomic64_lock_table_offset = options->atomic64_lock_table_offset,
    };
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    msl_gather_info(&ctx, options);
@@ -3358,6 +3582,8 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
       P(&ctx, "#include <metal_compute>\n");
    const bool rt = mesa_shader_stage_is_rt(shader->info.stage);
    P(&ctx, "#include <metal_stdlib>\n");
+   if (ctx.atomic64_lock_table_offset && uses_global_atomic64(shader))
+      P(&ctx, "using namespace metal;\n%s", kk_atomic64_helper);
    if (shader->info.ray_queries || rt)
       P(&ctx, "#include <metal_raytracing>\n");
    P(&ctx, "using namespace metal;\n");

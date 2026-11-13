@@ -17,6 +17,9 @@ struct vk_color_attachment_location_state;
 struct nir_to_msl_options {
    void *mem_ctx;
    uint64_t disabled_workarounds;
+   /* Byte offset in the root table (buf0) of the lock table's address for
+    * emulated 64-bit buffer atomics, 0 when they aren't emulated */
+   uint32_t atomic64_lock_table_offset;
 
    /* Required to correctly declare fragment outputs. Shader may contain
     * shrinked writes which can lead to writting less components than the ones

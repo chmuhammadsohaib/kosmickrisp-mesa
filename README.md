@@ -28,6 +28,7 @@ Most additions are opt-in with environment variables, so with none set the drive
 | device local memory type that isn't host visible | A regular `DEVICE_LOCAL`-only memory type, which AMD's FidelityFX runtime needs | `KK_DEVICE_LOCAL_TYPE=0` turns it off |
 | compute queue families | Up to two compute and transfer queue families, for engines that want a family of their own for async compute | `KK_COMPUTE_QUEUES=n[,m]` |
 | wsi/metal: rgba8 swapchains | `R8G8B8A8` swapchains, presented through a BGRA8 layer | |
+| emulated 64-bit buffer atomics | `shaderBufferInt64Atomics` through a lock table, since Metal has no 64-bit atomic add, exchange or compare-exchange (DOOM: The Dark Ages' ray tracing needs it) | `KK_ATOMIC64_EMULATION=1` |
 
 ## Performance
 

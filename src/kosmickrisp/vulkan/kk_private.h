@@ -18,6 +18,8 @@
 #define KK_MAX_SETS                      32
 #define KK_MAX_PUSH_SIZE                 256
 #define KK_MAX_DYNAMIC_BUFFERS           64
+/* Locks for KK_ATOMIC64_EMULATION (a power of two; addresses hash into it) */
+#define KK_ATOMIC64_LOCK_COUNT           65536
 #define KK_MAX_RTS                       8
 #define KK_MAX_SAMPLES                   8
 #define KK_MIN_SSBO_ALIGNMENT            16

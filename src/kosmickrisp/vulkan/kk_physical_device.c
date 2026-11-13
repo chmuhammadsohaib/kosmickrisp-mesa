@@ -243,7 +243,8 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_imageless_framebuffer = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_separate_depth_stencil_layouts = true,
-      .KHR_shader_atomic_int64 = false,
+      /* Emulated with a lock table (KK_ATOMIC64_EMULATION) */
+      .KHR_shader_atomic_int64 = pdev->settings.atomic64_emulation,
       .KHR_shader_float_controls = true,
       .KHR_shader_float16_int8 = true,
       .KHR_shader_subgroup_extended_types = true,
@@ -473,6 +474,8 @@ kk_get_device_features(
       .scalarBlockLayout = true,
       .separateDepthStencilLayouts = true,
       .shaderFloat16 = true,
+      /* KK_ATOMIC64_EMULATION; not threadgroup memory or images */
+      .shaderBufferInt64Atomics = pdev->settings.atomic64_emulation,
       .shaderInputAttachmentArrayDynamicIndexing = true,
       .shaderInputAttachmentArrayNonUniformIndexing = true,
       .shaderInt8 = true,
@@ -1224,7 +1227,8 @@ kk_physical_device_compiler_flags(const struct kk_physical_device *pdev)
           (uint64_t)pdev->settings.ray_tracing_enabled << 1 |
           (uint64_t)pdev->settings.sparse_enabled << 2 |
           (uint64_t)pdev->settings.nvx_enabled << 3 |
-          (uint64_t)pdev->settings.exact_output << 4;
+          (uint64_t)pdev->settings.exact_output << 4 |
+          (uint64_t)pdev->settings.atomic64_emulation << 5;
 }
 
 static void
@@ -1375,6 +1379,8 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    settings->sparse_enabled = debug_get_bool_option("KK_SPARSE", false);
    settings->nvx_enabled = debug_get_bool_option("KK_NVX", false);
    settings->exact_output = debug_get_bool_option("KK_EXACT", false);
+   settings->atomic64_emulation =
+      debug_get_bool_option("KK_ATOMIC64_EMULATION", false);
    settings->queue_count =
       CLAMP(debug_get_num_option("KK_QUEUE_COUNT", 1), 1, KK_MAX_MAIN_QUEUES);
    const char *compute = debug_get_option("KK_COMPUTE_QUEUES", "");

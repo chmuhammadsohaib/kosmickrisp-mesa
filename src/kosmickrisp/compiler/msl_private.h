@@ -35,6 +35,8 @@ struct nir_to_msl_ctx {
     * indexed by the query index, NULL when not remapped) */
    unsigned rq_slots;
    unsigned *rq_slot;
+   /* See nir_to_msl_options */
+   uint32_t atomic64_lock_table_offset;
    /* SSA values declared where they're defined instead of at function scope,
     * see predeclare_ssa_values */
    BITSET_WORD *scoped_defs;

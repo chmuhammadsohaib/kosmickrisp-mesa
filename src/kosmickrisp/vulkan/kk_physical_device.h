@@ -80,6 +80,9 @@ struct kk_env_settings {
    /* KK_EXACT=1: no optimization that can change output (e.g. Metal's own
     * order for subgroup float sums); off by default */
    bool exact_output;
+   /* KK_ATOMIC64_EMULATION=1: 64-bit atomics Metal lacks (compare-and-swap,
+    * exchange, add, ...) emulated with a lock table; off by default */
+   bool atomic64_emulation;
 };
 
 struct kk_physical_device {

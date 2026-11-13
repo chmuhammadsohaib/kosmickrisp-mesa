@@ -1328,6 +1328,10 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
    struct nir_to_msl_options translate_options = {
       .mem_ctx = NULL,
       .disabled_workarounds = pdev->settings.disabled_workarounds,
+      .atomic64_lock_table_offset =
+         pdev->settings.atomic64_emulation
+            ? offsetof(struct kk_root_descriptor_table, lock_table_addr)
+            : 0,
    };
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       for (uint32_t i = 0u; i < MAX_DRAW_BUFFERS; ++i) {
