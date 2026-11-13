@@ -1579,6 +1579,41 @@ kk_gather_ds_info(const struct vk_depth_stencil_state *ds, bool has_depth,
    }
 }
 
+/* A depth/stencil state the device owns: creating one is an Objective-C
+ * allocation and compile, and a state released while recorded work may still
+ * use it isn't safe with Metal 4 encoders, which don't retain what they're
+ * given */
+mtl_depth_stencil_state *
+kk_device_ds_state(struct kk_device *dev, const struct kk_shader_info *info)
+{
+   struct kk_ds_key key;
+   memset(&key, 0, sizeof(key));
+   key.depth_compare_op = info->vs.depth_compare_op;
+   key.has_depth_write = info->vs.has_depth_write;
+   key.has_stencil_test = info->vs.has_stencil_test;
+   if (key.has_stencil_test) {
+      memcpy(key.stencil[0], &info->vs.stencil_front, 6);
+      memcpy(key.stencil[1], &info->vs.stencil_back, 6);
+   }
+
+   simple_mtx_lock(&dev->ds_states.mutex);
+   struct hash_entry *entry =
+      _mesa_hash_table_search(dev->ds_states.table, &key);
+   mtl_depth_stencil_state *state = entry ? entry->data : NULL;
+   if (!state) {
+      state = kk_compile_ds_state(dev, (struct kk_shader_info *)info);
+      struct kk_ds_key *stored = malloc(sizeof(key));
+      if (state && stored) {
+         *stored = key;
+         _mesa_hash_table_insert(dev->ds_states.table, stored, state);
+      } else {
+         free(stored);
+      }
+   }
+   simple_mtx_unlock(&dev->ds_states.mutex);
+   return state;
+}
+
 mtl_depth_stencil_state *
 kk_compile_depth_stencil_state(struct kk_device *device,
                                const struct vk_depth_stencil_state *ds,
@@ -1586,7 +1621,7 @@ kk_compile_depth_stencil_state(struct kk_device *device,
 {
    struct kk_shader_info info = {};
    kk_gather_ds_info(ds, has_depth, has_stencil, &info);
-   return kk_compile_ds_state(device, &info);
+   return kk_device_ds_state(device, &info);
 }
 
 /* Copies all msl shader data to the vertex and gathers information for pipeline

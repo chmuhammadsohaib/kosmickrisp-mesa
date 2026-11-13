@@ -259,6 +259,31 @@ kk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
    return VK_SUCCESS;
 }
 
+/* Depth/stencil state cache */
+
+static uint32_t
+kk_ds_key_hash(const void *key)
+{
+   return _mesa_hash_data(key, sizeof(struct kk_ds_key));
+}
+
+static bool
+kk_ds_key_equal(const void *a, const void *b)
+{
+   return memcmp(a, b, sizeof(struct kk_ds_key)) == 0;
+}
+
+static void
+kk_device_finish_ds_states(struct kk_device *dev)
+{
+   hash_table_foreach(dev->ds_states.table, entry) {
+      mtl_release(entry->data);
+      free((void *)entry->key);
+   }
+   _mesa_hash_table_destroy(dev->ds_states.table, NULL);
+   simple_mtx_destroy(&dev->ds_states.mutex);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 kk_CreateDevice(VkPhysicalDevice physicalDevice,
                 const VkDeviceCreateInfo *pCreateInfo,
@@ -427,6 +452,10 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
                                 KK_MAX_OCCLUSION_QUERIES);
    if (result != VK_SUCCESS)
       goto fail_meta;
+
+   simple_mtx_init(&dev->ds_states.mutex, mtx_plain);
+   dev->ds_states.table =
+      _mesa_hash_table_create(NULL, kk_ds_key_hash, kk_ds_key_equal);
 
    result = kk_init_sampler_heap(dev, &dev->samplers);
    if (result != VK_SUCCESS)

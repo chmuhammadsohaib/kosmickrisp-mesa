@@ -693,12 +693,10 @@ kk_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
       kk_push_constants(cmd, &cmd->state.rt.descriptors, pPushConstantsInfo);
 }
 
+/* Dynamic depth/stencil states belong to the device (kk_device_ds_state) */
 void
 kk_cmd_release_dynamic_ds_state(struct kk_cmd_buffer *cmd)
 {
-   if (cmd->state.gfx.is_depth_stencil_dynamic &&
-       cmd->state.gfx.depth_stencil_state)
-      mtl_release(cmd->state.gfx.depth_stencil_state);
    cmd->state.gfx.depth_stencil_state = NULL;
 }
 
