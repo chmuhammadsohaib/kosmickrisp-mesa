@@ -174,6 +174,7 @@ struct kk_device {
    struct kk_bo *sparse_unmap_bo;
    /* KK_ATOMIC64_EMULATION: 32-bit locks, zeroed (kk_nir_lower_atomic64) */
    struct kk_bo *atomic64_locks;
+   struct kk_bo *clock_counter;
 
    /* Geomtry heap */
    struct kk_bo *heap;

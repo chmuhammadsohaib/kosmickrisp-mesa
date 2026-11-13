@@ -66,6 +66,8 @@ struct kk_root_descriptor_table {
    /* KK_ATOMIC64_EMULATION: the device's lock table (kk_nir_lower_atomic64),
     * 0 without it. Last, so the fields above keep their offsets. */
    uint64_t lock_table_addr __attribute__((aligned(8)));
+   /* KK_SHADER_CLOCK: the device's shader clock counter, 0 without it */
+   uint64_t clock_counter_addr;
 };
 
 struct kk_descriptor_state {

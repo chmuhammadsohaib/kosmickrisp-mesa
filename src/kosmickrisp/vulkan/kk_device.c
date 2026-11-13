@@ -411,6 +411,13 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
       memset(dev->atomic64_locks->cpu, 0, KK_ATOMIC64_LOCK_COUNT * 4u);
    }
 
+   if (pdev->settings.shader_clock) {
+      result = kk_alloc_bo(dev, &dev->vk.base, 64u, 0, &dev->clock_counter);
+      if (result != VK_SUCCESS)
+         goto fail_vab_memory;
+      memset(dev->clock_counter->cpu, 0, 64u);
+   }
+
    if (pdev->settings.sparse_enabled) {
       result = kk_alloc_private_bo(dev, &dev->vk.base, MTL_SPARSE_PAGE_SIZE_B,
                                   &dev->sparse_unmap_bo);
@@ -505,6 +512,8 @@ fail_vab_memory:
       kk_destroy_bo(dev, dev->sparse_unmap_bo);
    if (dev->atomic64_locks)
       kk_destroy_bo(dev, dev->atomic64_locks);
+   if (dev->clock_counter)
+      kk_destroy_bo(dev, dev->clock_counter);
    kk_mfx_finish(dev);
    kk_device_finish_rt(dev);
    kk_device_finish_rt_stacks(dev);
@@ -557,6 +566,8 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       kk_destroy_bo(dev, dev->sparse_unmap_bo);
    if (dev->atomic64_locks)
       kk_destroy_bo(dev, dev->atomic64_locks);
+   if (dev->clock_counter)
+      kk_destroy_bo(dev, dev->clock_counter);
 
    /* Geometry heap */
    if (dev->heap)

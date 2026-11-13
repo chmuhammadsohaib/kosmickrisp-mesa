@@ -37,6 +37,7 @@ struct nir_to_msl_ctx {
    unsigned *rq_slot;
    /* See nir_to_msl_options */
    uint32_t atomic64_lock_table_offset;
+   uint32_t clock_counter_offset;
    /* SSA values declared where they're defined instead of at function scope,
     * see predeclare_ssa_values */
    BITSET_WORD *scoped_defs;

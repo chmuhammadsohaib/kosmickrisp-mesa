@@ -83,6 +83,9 @@ struct kk_env_settings {
    /* KK_ATOMIC64_EMULATION=1: 64-bit atomics Metal lacks (compare-and-swap,
     * exchange, add, ...) emulated with a lock table; off by default */
    bool atomic64_emulation;
+   /* KK_SHADER_CLOCK=0: the shader clock is a per-invocation counter whose
+    * low bits never change (the old behaviour) instead of a device-wide one */
+   bool shader_clock;
 };
 
 struct kk_physical_device {

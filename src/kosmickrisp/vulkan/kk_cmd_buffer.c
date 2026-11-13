@@ -809,6 +809,7 @@ kk_upload_descriptor_root(struct kk_cmd_buffer *cmd,
    root->addr = root_ptr.gpu;
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
    root->lock_table_addr = dev->atomic64_locks ? dev->atomic64_locks->gpu : 0;
+   root->clock_counter_addr = dev->clock_counter ? dev->clock_counter->gpu : 0;
 
    memcpy(root_ptr.cpu, root, sizeof(*root));
    desc->root_dirty = false;

@@ -1084,6 +1084,35 @@ static const char kk_atomic64_helper[] =
    "    }\n"
    "}\n\n";
 
+/* The shader clock (KK_SHADER_CLOCK, on by default): a device-wide counter,
+ * one atomic per SIMD group, each active lane taking the next value. Its low
+ * bits are repeated below the shifted count, so they differ between threads
+ * and frames as a real clock's do, and it still moves 1024 per read for loops
+ * that wait for elapsed time. */
+static const char kk_clock_helper[] =
+   "static inline ulong kk_clock_read(device atomic_uint *counter)\n"
+   "{\n"
+   "    uint lanes = popcount((ulong)simd_active_threads_mask());\n"
+   "    uint base = 0u;\n"
+   "    if (simd_is_first())\n"
+   "        base = atomic_fetch_add_explicit(counter, lanes, memory_order_relaxed);\n"
+   "    uint v = simd_broadcast_first(base) + simd_prefix_exclusive_sum(1u);\n"
+   "    return (ulong(v) << 10) | ulong(v & 1023u);\n"
+   "}\n\n";
+
+static bool
+reads_shader_clock(nir_function_impl *impl)
+{
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_shader_clock)
+            return true;
+      }
+   }
+   return false;
+}
+
 static bool
 atomic64_emulated(const struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
                   bool shared)
@@ -2586,11 +2615,19 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       P(ctx, "0x0;\n");
       break;
    case nir_intrinsic_shader_clock:
-      /* Metal has no shader clock. Games read it unasked (DOOM: The Dark Ages
-       * picks atomic slots from its low bits), so return a per-invocation
-       * counter that advances on every read: monotonic, as the spec wants,
-       * and elapsed-time loops still end. */
-      P(ctx, "as_type<uint2>(kk_clock += 1024ul);\n");
+      /* Metal has no shader clock. Games read it unasked: DOOM: The Dark Ages
+       * uses its low bits as a random number to pick which threads record
+       * streaming requests, so they have to change between threads and
+       * frames (see kk_clock_helper); a per-invocation counter whose low bits
+       * never change made the same objects lose every time, and they never
+       * streamed in. Monotonic per invocation, and elapsed-time loops end. */
+      if (ctx->clock_counter_offset) {
+         P(ctx, "as_type<uint2>(kk_clock = max(kk_clock + 1024ul, kk_clock_read((device atomic_uint *)"
+                "(*(constant ulong *)((constant char *)&buf0 + %u)))));\n",
+           ctx->clock_counter_offset);
+      } else {
+         P(ctx, "as_type<uint2>(kk_clock += 1024ul);\n");
+      }
       break;
    default:
       P_IND(ctx, "Unknown intrinsic %s\n", info->name);
@@ -3306,15 +3343,7 @@ def_uses_in_scope(nir_def *def)
 static void
 predeclare_ssa_values(struct nir_to_msl_ctx *ctx, nir_function_impl *impl)
 {
-   bool reads_clock = false;
-   nir_foreach_block(block, impl) {
-      nir_foreach_instr(instr, block) {
-         if (instr->type == nir_instr_type_intrinsic &&
-             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_shader_clock)
-            reads_clock = true;
-      }
-   }
-   if (reads_clock)
+   if (reads_shader_clock(impl))
       P_IND(ctx, "ulong kk_clock = 0ul;\n");
 
    if (!mesa_shader_stage_is_rt(ctx->shader->info.stage)) {
@@ -3570,6 +3599,7 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
       .text = _mesa_string_buffer_create(options->mem_ctx, 1024),
       .disabled_workarounds = options->disabled_workarounds,
       .atomic64_lock_table_offset = options->atomic64_lock_table_offset,
+      .clock_counter_offset = options->clock_counter_offset,
    };
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    msl_gather_info(&ctx, options);
@@ -3584,6 +3614,8 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    P(&ctx, "#include <metal_stdlib>\n");
    if (ctx.atomic64_lock_table_offset && uses_global_atomic64(shader))
       P(&ctx, "using namespace metal;\n%s", kk_atomic64_helper);
+   if (ctx.clock_counter_offset && reads_shader_clock(nir_shader_get_entrypoint(shader)))
+      P(&ctx, "using namespace metal;\n%s", kk_clock_helper);
    if (shader->info.ray_queries || rt)
       P(&ctx, "#include <metal_raytracing>\n");
    P(&ctx, "using namespace metal;\n");
