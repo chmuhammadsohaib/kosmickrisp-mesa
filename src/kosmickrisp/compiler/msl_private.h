@@ -26,6 +26,11 @@ struct nir_to_msl_ctx {
    struct _mesa_string_buffer *text;
    uint64_t disabled_workarounds;
    bool uses_per_draw_data;
+   /* Ray queries: whether any reads barycentrics or the front face (needs
+    * Metal's triangle_data), and whether any looks at candidates (otherwise
+    * candidates that can't commit without the shader are culled) */
+   bool rq_triangle_data;
+   bool rq_candidates;
    /* SSA values declared where they're defined instead of at function scope,
     * see predeclare_ssa_values */
    BITSET_WORD *scoped_defs;

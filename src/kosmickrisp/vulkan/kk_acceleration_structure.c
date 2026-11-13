@@ -573,6 +573,35 @@ kk_as_rebuild_instead(
    return true;
 }
 
+/* Usage for a bottom-level build of an updatable structure too small to be
+ * refit (kk_as_rebuild_instead): every update of it is a new build, so it
+ * gains nothing from Metal's refit layout, which Apple says can trace slower,
+ * and it's built again soon, so a fast build beats a slow better one. Updates
+ * keep the primitive counts of the build (Vulkan requires it), so a structure
+ * built small is always rebuilt. */
+static enum mtl_acceleration_structure_usage
+kk_as_build_usage(struct kk_cmd_buffer *cmd,
+                  const VkAccelerationStructureBuildGeometryInfoKHR *info,
+                  const VkAccelerationStructureBuildRangeInfoKHR *ranges,
+                  enum mtl_acceleration_structure_usage usage)
+{
+   const struct kk_device *dev = kk_cmd_buffer_device(cmd);
+
+   if (info->type == VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR ||
+       !(info->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR))
+      return usage;
+
+   uint64_t primitives = 0;
+   for (uint32_t g = 0; g < info->geometryCount; g++)
+      primitives += ranges[g].primitiveCount;
+   if (primitives >= (uint64_t)dev->as_pool.refit_min_prims)
+      return usage;
+
+   usage &= ~(MTL_ACCELERATION_STRUCTURE_USAGE_REFIT |
+              MTL_ACCELERATION_STRUCTURE_USAGE_PREFER_FAST_INTERSECTION);
+   return usage | MTL_ACCELERATION_STRUCTURE_USAGE_PREFER_FAST_BUILD;
+}
+
 static void
 kk_as_count_builds(
    struct kk_cmd_buffer *cmd, uint32_t info_count,
@@ -620,6 +649,7 @@ kk_CmdBuildAccelerationStructuresKHR(
    /* Builds in one call are independent: convert every TLAS's instances
     * first, wait once, then encode all builds with no barrier between them.
     */
+   bool converted = false;
    for (uint32_t i = 0; i < infoCount; i++) {
       const VkAccelerationStructureBuildGeometryInfoKHR *info = &pInfos[i];
       if (info->type != VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR ||
@@ -634,11 +664,16 @@ kk_CmdBuildAccelerationStructuresKHR(
                               instances->data.deviceAddress +
                                  ppBuildRangeInfos[i][0].primitiveOffset,
                               instances->arrayOfPointers, count);
+      converted = true;
    }
 
+   /* The builds wait for the instance conversions above; the app's own
+    * barriers order them after its writes to vertex and instance data */
    mtl_compute_encoder *encoder = cs_get_compute(cmd);
-   mtl_barrier_after_encoder_stages(
-      encoder, MTL_STAGE_DISPATCH | MTL_STAGE_BLIT, MTL_STAGE_ACCELERATION_STRUCTURE);
+   if (converted)
+      mtl_barrier_after_encoder_stages(
+         encoder, MTL_STAGE_DISPATCH | MTL_STAGE_BLIT,
+         MTL_STAGE_ACCELERATION_STRUCTURE);
 
    for (uint32_t i = 0; i < infoCount; i++) {
       const VkAccelerationStructureBuildGeometryInfoKHR *info = &pInfos[i];
@@ -660,6 +695,9 @@ kk_CmdBuildAccelerationStructuresKHR(
           kk_as_rebuild_instead(cmd, info, ppBuildRangeInfos[i], src))
          update = false;
       dst->refits = update ? src->refits + 1 : 0;
+      if (!update)
+         desc.usage = kk_as_build_usage(cmd, info, ppBuildRangeInfos[i],
+                                        desc.usage);
 
       if (update) {
          mtl_refit_acceleration_structure(
