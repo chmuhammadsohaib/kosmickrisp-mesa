@@ -590,6 +590,7 @@ kk_device_add_heap_to_residency_set(struct kk_device *dev, mtl_heap *heap)
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_add_allocation(dev->residency_set.handle, heap);
+   dev->residency_set.dirty = true;
    simple_mtx_unlock(&dev->residency_set.mutex);
    KK_RT_STATS_ADD(dev, KK_RT_STAT_RESIDENCY_ADDS, 1);
 }
@@ -599,6 +600,7 @@ kk_device_remove_heap_from_residency_set(struct kk_device *dev, mtl_heap *heap)
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_remove_allocation(dev->residency_set.handle, heap);
+   dev->residency_set.dirty = true;
    simple_mtx_unlock(&dev->residency_set.mutex);
    KK_RT_STATS_ADD(dev, KK_RT_STAT_RESIDENCY_REMOVES, 1);
 }
@@ -608,6 +610,7 @@ kk_device_add_buffer_to_residency_set(struct kk_device *dev, mtl_buffer *buffer)
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_add_allocation(dev->residency_set.handle, buffer);
+   dev->residency_set.dirty = true;
    simple_mtx_unlock(&dev->residency_set.mutex);
    KK_RT_STATS_ADD(dev, KK_RT_STAT_RESIDENCY_ADDS, 1);
 }
@@ -618,18 +621,25 @@ kk_device_remove_buffer_from_residency_set(struct kk_device *dev,
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_remove_allocation(dev->residency_set.handle, buffer);
+   dev->residency_set.dirty = true;
    simple_mtx_unlock(&dev->residency_set.mutex);
    KK_RT_STATS_ADD(dev, KK_RT_STAT_RESIDENCY_REMOVES, 1);
 }
 
 
 
+
 void
 kk_device_make_resources_resident(struct kk_device *dev)
 {
+   /* The set is attached to every queue, which keeps what it holds resident;
+    * it only needs committing when allocations came or went */
    simple_mtx_lock(&dev->residency_set.mutex);
-   mtl_residency_set_commit(dev->residency_set.handle);
-   mtl_residency_set_request_residency(dev->residency_set.handle);
+   if (dev->residency_set.dirty) {
+      mtl_residency_set_commit(dev->residency_set.handle);
+      mtl_residency_set_request_residency(dev->residency_set.handle);
+      dev->residency_set.dirty = false;
+   }
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 

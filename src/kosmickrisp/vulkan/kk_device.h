@@ -32,6 +32,7 @@ struct vk_pipeline_cache;
 struct kk_residency_set {
    simple_mtx_t mutex;
    mtl_residency_set *handle;
+   bool dirty; /* allocations added or removed since the last commit */
 };
 
 struct mtl_sampler_packed {
@@ -93,6 +94,12 @@ struct kk_device {
    /* Track all heaps the user allocated so we can set them all as resident when
     * recording as required by Metal. */
    struct kk_residency_set residency_set;
+   /* Depth/stencil states for dynamic depth/stencil, by state; kept for the
+    * device's life (a game uses a few dozen at most) */
+   struct {
+      simple_mtx_t mutex;
+      struct hash_table *table;
+   } ds_states;
 
    struct kk_precompiled_cache precompiled_cache;
 
@@ -191,6 +198,17 @@ void kk_device_add_buffer_to_residency_set(struct kk_device *dev,
 void kk_device_remove_buffer_from_residency_set(struct kk_device *dev,
                                                 mtl_buffer *buffer);
 void kk_device_make_resources_resident(struct kk_device *dev);
+/* Key of the depth/stencil state cache (kk_device_ds_state in kk_shader.c) */
+struct kk_ds_key {
+   VkCompareOp depth_compare_op;
+   uint8_t stencil[2][6];
+   bool has_depth_write;
+   bool has_stencil_test;
+};
+
+struct kk_shader_info;
+mtl_depth_stencil_state *kk_device_ds_state(struct kk_device *dev,
+                                            const struct kk_shader_info *info);
 
 void kk_device_init_rt(struct kk_device *dev);
 void kk_device_finish_rt(struct kk_device *dev);
