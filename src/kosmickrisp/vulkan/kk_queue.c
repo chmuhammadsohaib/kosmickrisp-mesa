@@ -223,6 +223,81 @@ kk_queue_release_cmd_buffer_locked(struct kk_queue *queue,
    util_dynarray_append(&queue->free_cmd_buffers, &cmd->vk);
 }
 
+/* KK_SYNC_DEBUG: the last semaphore waits and signals the queues submitted,
+ * so a GPU timeout can say which wait was never satisfied (a queue waiting on
+ * an event nothing signals times out like a hung shader). Events are retained
+ * while they're in the ring. */
+#define KK_SYNC_RING 256
+static struct {
+   simple_mtx_t lock;
+   bool init;
+   uint32_t next;
+   struct {
+      mtl_shared_event *event;
+      uint64_t value;
+      const void *queue;
+      bool signal;
+   } rec[KK_SYNC_RING];
+} kk_sync_ring;
+
+static void
+kk_sync_ring_add(const void *queue, mtl_shared_event *event, uint64_t value,
+                 bool signal)
+{
+   simple_mtx_lock(&kk_sync_ring.lock);
+   uint32_t i = kk_sync_ring.next++ % KK_SYNC_RING;
+   if (kk_sync_ring.rec[i].event)
+      mtl_release(kk_sync_ring.rec[i].event);
+   kk_sync_ring.rec[i].event = mtl_retain(event);
+   kk_sync_ring.rec[i].value = value;
+   kk_sync_ring.rec[i].queue = queue;
+   kk_sync_ring.rec[i].signal = signal;
+   simple_mtx_unlock(&kk_sync_ring.lock);
+}
+
+static void
+kk_sync_ring_report(void)
+{
+   simple_mtx_lock(&kk_sync_ring.lock);
+   unsigned unsatisfied = 0;
+   for (uint32_t i = 0; i < KK_SYNC_RING; i++) {
+      if (!kk_sync_ring.rec[i].event || kk_sync_ring.rec[i].signal)
+         continue;
+      uint64_t now = mtl_shared_event_get_signaled_value(kk_sync_ring.rec[i].event);
+      if (now >= kk_sync_ring.rec[i].value)
+         continue;
+      uint64_t submitted = 0;
+      const void *signaller = NULL;
+      for (uint32_t j = 0; j < KK_SYNC_RING; j++) {
+         if (kk_sync_ring.rec[j].signal &&
+             kk_sync_ring.rec[j].event == kk_sync_ring.rec[i].event &&
+             kk_sync_ring.rec[j].value > submitted) {
+            submitted = kk_sync_ring.rec[j].value;
+            signaller = kk_sync_ring.rec[j].queue;
+         }
+      }
+      if (unsatisfied++ < 16)
+         fprintf(stderr,
+                 "[kk] sync-debug: queue %p waits on event %p for %llu, which is at %llu; "
+                 "highest signal submitted %llu (queue %p)\n",
+                 kk_sync_ring.rec[i].queue, kk_sync_ring.rec[i].event,
+                 (unsigned long long)kk_sync_ring.rec[i].value, (unsigned long long)now,
+                 (unsigned long long)submitted, signaller);
+   }
+   fprintf(stderr, "[kk] sync-debug: %u unsatisfied waits among the last %u\n", unsatisfied,
+           MIN2(kk_sync_ring.next, KK_SYNC_RING));
+   /* The last submissions in order, to see whether the app's own order is a cycle */
+   uint32_t n = MIN2(kk_sync_ring.next, 48u);
+   for (uint32_t k = kk_sync_ring.next - n; k < kk_sync_ring.next; k++) {
+      uint32_t i = k % KK_SYNC_RING;
+      fprintf(stderr, "[kk] sync-order %u: queue %p %s event %p %llu (now %llu)\n", k,
+              kk_sync_ring.rec[i].queue, kk_sync_ring.rec[i].signal ? "signal" : "wait  ",
+              kk_sync_ring.rec[i].event, (unsigned long long)kk_sync_ring.rec[i].value,
+              (unsigned long long)mtl_shared_event_get_signaled_value(kk_sync_ring.rec[i].event));
+   }
+   simple_mtx_unlock(&kk_sync_ring.lock);
+}
+
 static void
 check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
 {
@@ -234,10 +309,13 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
    if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
       /* Games often just wait forever once the device is lost; say so once */
       static bool reported;
-      if (!p_atomic_xchg(&reported, true))
+      if (!p_atomic_xchg(&reported, true)) {
          fprintf(stderr, "[kk] GPU error: %s (%s); the device is lost\n",
                  mtl_command_queue_error_to_string(data->error),
                  data->error_message ? data->error_message : "no message");
+         if (dev->sync_debug.enabled && kk_sync_ring.init)
+            kk_sync_ring_report();
+      }
       vk_device_set_lost(
          &dev->vk, "Command queue error: %s, with message \"%s\"",
          mtl_command_queue_error_to_string(data->error), data->error_message);
@@ -408,6 +486,8 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
       struct kk_sync_timeline *sync =
          container_of(wait->sync, struct kk_sync_timeline, base);
       mtl_wait_for_event(queue->mtl_handle, sync->mtl_handle, wait->wait_value);
+      if (unlikely(dev->sync_debug.enabled))
+         kk_sync_ring_add(queue, sync->mtl_handle, wait->wait_value, false);
    }
    /* The first commit of this submit is the one that waits */
    queue->timeline_waits = submit->wait_count;
@@ -459,6 +539,8 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
          container_of(signal->sync, struct kk_sync_timeline, base);
       mtl_signal_event(queue->mtl_handle, sync->mtl_handle,
                        signal->signal_value);
+      if (unlikely(dev->sync_debug.enabled))
+         kk_sync_ring_add(queue, sync->mtl_handle, signal->signal_value, true);
    }
 
    return VK_SUCCESS;
@@ -469,6 +551,11 @@ kk_queue_init(struct kk_device *dev, struct kk_queue *queue,
               const VkDeviceQueueCreateInfo *pCreateInfo,
               uint32_t index_in_family)
 {
+   if (!kk_sync_ring.init) {
+      simple_mtx_init(&kk_sync_ring.lock, mtx_plain);
+      kk_sync_ring.init = true;
+   }
+
    const VkDeviceQueueGlobalPriorityCreateInfo *priority_info =
       vk_find_struct_const(pCreateInfo->pNext,
                            DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO);
