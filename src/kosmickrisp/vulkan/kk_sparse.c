@@ -190,19 +190,44 @@ kk_bind_sparse_buffer(struct kk_queue *queue,
 {
    VK_FROM_HANDLE(kk_buffer, buffer, info->buffer);
 
-   for (uint32_t i = 0; i < info->bindCount; i++) {
-      const VkSparseMemoryBind *bind = &info->pBinds[i];
-      mtl_heap *heap = kk_sparse_heap(queue, bind->memory);
+   /* Consecutive binds to the same heap go in one Metal call (games often bind
+    * a tile at a time); pages contiguous in both buffer and heap merge */
+   struct util_dynarray mappings = UTIL_DYNARRAY_INIT;
+   mtl_heap *run_heap = NULL;
+   for (uint32_t i = 0; i <= info->bindCount; i++) {
+      const VkSparseMemoryBind *bind = i < info->bindCount ? &info->pBinds[i] : NULL;
+      mtl_heap *heap = bind ? kk_sparse_heap(queue, bind->memory) : NULL;
+      if ((!bind || heap != run_heap) && mappings.size) {
+         mtl_command_queue_update_buffer_mappings(
+            queue->mtl_handle, buffer->metal.handle, run_heap,
+            util_dynarray_begin(&mappings),
+            util_dynarray_num_elements(&mappings,
+                                       struct mtl_sparse_buffer_mapping));
+         util_dynarray_clear(&mappings);
+      }
+      if (!bind)
+         break;
+      run_heap = heap;
       const struct mtl_sparse_buffer_mapping mapping = {
          .map = bind->memory != VK_NULL_HANDLE,
          .first_page = bind->resourceOffset / MTL_SPARSE_PAGE_SIZE_B,
          .page_count = div_round_up(bind->size, MTL_SPARSE_PAGE_SIZE_B),
          .heap_page = bind->memoryOffset / MTL_SPARSE_PAGE_SIZE_B,
       };
-      mtl_command_queue_update_buffer_mappings(queue->mtl_handle,
-                                               buffer->metal.handle, heap,
-                                               &mapping, 1);
+      struct mtl_sparse_buffer_mapping *last =
+         mappings.size ? util_dynarray_top_ptr(&mappings,
+                                               struct mtl_sparse_buffer_mapping)
+                       : NULL;
+      if (last && last->map == mapping.map &&
+          last->first_page + last->page_count == mapping.first_page &&
+          (!mapping.map ||
+           last->heap_page + last->page_count == mapping.heap_page)) {
+         last->page_count += mapping.page_count;
+         continue;
+      }
+      util_dynarray_append(&mappings, mapping);
    }
+   util_dynarray_fini(&mappings);
 }
 
 /* Mapping of one page of a sparse image's opaque address space */
@@ -291,9 +316,23 @@ kk_bind_sparse_image(struct kk_queue *queue,
    VK_FROM_HANDLE(kk_image, image, info->image);
    const struct mtl_size tile = image->sparse_info.tile;
 
-   for (uint32_t i = 0; i < info->bindCount; i++) {
-      const VkSparseImageMemoryBind *bind = &info->pBinds[i];
-      mtl_heap *heap = kk_sparse_heap(queue, bind->memory);
+   /* Consecutive binds to the same heap go in one Metal call */
+   struct util_dynarray mappings = UTIL_DYNARRAY_INIT;
+   mtl_heap *run_heap = NULL;
+   for (uint32_t i = 0; i <= info->bindCount; i++) {
+      const VkSparseImageMemoryBind *bind = i < info->bindCount ? &info->pBinds[i] : NULL;
+      mtl_heap *heap = bind ? kk_sparse_heap(queue, bind->memory) : NULL;
+      if ((!bind || heap != run_heap) && mappings.size) {
+         mtl_command_queue_update_texture_mappings(
+            queue->mtl_handle, image->planes[0].mtl_handle, run_heap,
+            util_dynarray_begin(&mappings),
+            util_dynarray_num_elements(&mappings,
+                                       struct mtl_sparse_texture_mapping));
+         util_dynarray_clear(&mappings);
+      }
+      if (!bind)
+         break;
+      run_heap = heap;
 
       /* Metal assigns heap pages to the region's tiles in X, Y, Z order */
       const struct mtl_sparse_texture_mapping mapping = {
@@ -307,9 +346,9 @@ kk_bind_sparse_image(struct kk_queue *queue,
          .slice = bind->subresource.arrayLayer,
          .heap_page = bind->memoryOffset / MTL_SPARSE_PAGE_SIZE_B,
       };
-      mtl_command_queue_update_texture_mappings(
-         queue->mtl_handle, image->planes[0].mtl_handle, heap, &mapping, 1);
+      util_dynarray_append(&mappings, mapping);
    }
+   util_dynarray_fini(&mappings);
 }
 
 void
