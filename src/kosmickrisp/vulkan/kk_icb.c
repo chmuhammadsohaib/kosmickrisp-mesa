@@ -123,6 +123,7 @@ kk_icb_get_chunk(struct kk_device *dev, uint32_t slots,
    if (!out->handle)
       return false;
    out->capacity = capacity;
+   out->used = 0u;
    kk_device_add_allocation_to_residency_set(dev, out->handle);
    return true;
 }
@@ -153,6 +154,9 @@ kk_icb_reserve(struct kk_cmd_buffer *cmd, uint32_t count,
    *location = icb->next_slot;
    icb->next_slot += count;
    icb->pass_slots += count;
+   struct kk_icb_chunk *c =
+      util_dynarray_element(&icb->chunks, struct kk_icb_chunk, icb->chunk);
+   c->used = MAX2(c->used, icb->next_slot);
    return true;
 }
 
@@ -161,6 +165,11 @@ kk_icb_cmd_release(struct kk_device *dev, struct kk_icb_cmd *icb)
 {
    if (!util_dynarray_num_elements(&icb->chunks, struct kk_icb_chunk))
       return;
+   util_dynarray_foreach(&icb->chunks, struct kk_icb_chunk, c) {
+      if (c->used)
+         mtl_indirect_command_buffer_reset(c->handle, 0u, c->used);
+      c->used = 0u;
+   }
    simple_mtx_lock(&dev->icb.lock);
    util_dynarray_append_dynarray(&dev->icb.free_chunks, &icb->chunks);
    simple_mtx_unlock(&dev->icb.lock);

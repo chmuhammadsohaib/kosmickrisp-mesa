@@ -372,12 +372,25 @@ mtl_new_indirect_command_buffer(mtl_device *dev, uint32_t max_count,
          MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed;
       desc.inheritPipelineState = YES;
       desc.inheritBuffers = YES;
+      /* Shared, so the CPU can reset it: commands start out undefined */
       id<MTLIndirectCommandBuffer> icb =
          [device newIndirectCommandBufferWithDescriptor:desc
                                         maxCommandCount:max_count
-                                                options:MTLResourceStorageModePrivate];
-      if (icb)
+                                                options:MTLResourceStorageModeShared];
+      if (icb) {
+         [icb resetWithRange:NSMakeRange(0, max_count)];
          *resource_id = icb.gpuResourceID._impl;
+      }
       return icb;
+   }
+}
+
+void
+mtl_indirect_command_buffer_reset(mtl_indirect_command_buffer *icb,
+                                  uint32_t location, uint32_t count)
+{
+   @autoreleasepool {
+      [(id<MTLIndirectCommandBuffer>)icb
+         resetWithRange:NSMakeRange(location, count)];
    }
 }

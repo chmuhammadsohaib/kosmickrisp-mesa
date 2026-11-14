@@ -30,6 +30,7 @@ struct kk_icb_chunk {
    mtl_indirect_command_buffer *handle;
    uint64_t resource_id;
    uint32_t capacity;
+   uint32_t used; /* slots written since it was last reset */
 };
 
 struct kk_icb_device {
@@ -42,7 +43,9 @@ struct kk_icb_device {
  * render pass every call gets slots of its own: Metal doesn't say which stage
  * reads an executing ICB's commands, so no in-pass barrier can protect a slot
  * being rewritten. Passes end with a full barrier (end_encoder), so the next
- * pass starts over in the same chunks. */
+ * pass starts over in the same chunks. Chunks are new or reset when a command
+ * buffer gets them, so a command read before its encoding lands is a no-op,
+ * never an undefined or stale draw. */
 struct kk_icb_cmd {
    struct util_dynarray chunks; /* struct kk_icb_chunk */
    uint32_t chunk;              /* the chunk the next call starts looking in */
