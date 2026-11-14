@@ -70,6 +70,7 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
       return;
 
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->counts.dispatches++;
 
    struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
    desc->root_dirty |= desc->root.cs.base_group[0] != baseGroupX;
@@ -119,6 +120,7 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
                            const VkDispatchIndirect2InfoKHR *pInfo)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->counts.dispatches++;
 
    struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
    desc->root_dirty |= desc->root.cs.base_group[0] != 0;

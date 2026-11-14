@@ -2129,6 +2129,7 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
    mtl_render_execute_commands_indirect(enc, chunk.handle, range);
    cmd->icb.executed = true;
+   cmd->counts.icb_calls++;
 
    if (unlikely(kk_tl_draw_counters))
       p_atomic_inc(&kk_tl_draw_counters[3]);
@@ -2148,6 +2149,7 @@ kk_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    data->flatshade_first =
       dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
 
+   cmd->counts.draws++;
    if (data->predicate_count > 0 &&
        data->predicate_op[0] == KK_PREDICATE_GT_DRAW_ID &&
        kk_icb_draw(cmd, data))

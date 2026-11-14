@@ -298,6 +298,37 @@ kk_sync_ring_report(void)
    simple_mtx_unlock(&kk_sync_ring.lock);
 }
 
+/* KK_SYNC_DEBUG: what each committed command buffer recorded, reported when
+ * the GPU fails one (a timeout names the work that ran too long) */
+struct kk_sd_commit {
+   mtl_feedback_handler_callback callback;
+   void *user_data;
+   const struct kk_queue *queue;
+   struct kk_sd_counts {
+      uint32_t draws, icb_calls, dispatches, traces, as_builds, mfx_scales,
+         mfx_interpolations;
+   } counts;
+};
+
+static void
+kk_sd_feedback(struct mtl_feedback_data *data)
+{
+   struct kk_sd_commit *c = data->user_data;
+   if (data->error != MTL_COMMAND_QUEUE_ERROR_NONE) {
+      static uint32_t reports;
+      if (p_atomic_inc_return(&reports) <= 4)
+         fprintf(stderr,
+                 "[kk] sync-debug: failed command buffer on queue %p: %u draws, %u GPU-built draw calls, "
+                 "%u dispatches, %u ray dispatches, %u acceleration structure builds, %u MetalFX upscales, "
+                 "%u MetalFX interpolations\n",
+                 c->queue, c->counts.draws, c->counts.icb_calls, c->counts.dispatches, c->counts.traces,
+                 c->counts.as_builds, c->counts.mfx_scales, c->counts.mfx_interpolations);
+   }
+   data->user_data = c->user_data;
+   c->callback(data);
+   free(c);
+}
+
 static void
 check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
 {
@@ -373,6 +404,17 @@ kk_queue_commit(struct kk_queue *queue, struct kk_cmd_buffer *cmd,
    KK_RT_STATS_ADD(kk_queue_device(queue), KK_RT_STAT_CMDS_COMMITTED, 1);
    if (unlikely(kk_queue_device(queue)->sync_debug.enabled))
       p_atomic_inc(&kk_queue_device(queue)->sync_debug.committed);
+
+   if (unlikely(kk_queue_device(queue)->sync_debug.enabled)) {
+      struct kk_sd_commit *c = malloc(sizeof(*c));
+      if (c) {
+         *c = (struct kk_sd_commit){callback, user_data, queue};
+         STATIC_ASSERT(sizeof(c->counts) == sizeof(cmd->counts));
+         memcpy(&c->counts, &cmd->counts, sizeof(c->counts));
+         callback = kk_sd_feedback;
+         user_data = c;
+      }
+   }
 
    if (unlikely(kk_tl_enabled())) {
       struct kk_tl_commit *c = malloc(sizeof(*c));

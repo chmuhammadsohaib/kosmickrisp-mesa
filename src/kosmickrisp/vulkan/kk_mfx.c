@@ -607,6 +607,7 @@ kk_mfx_cmd_upscale(struct kk_cmd_buffer *cmd,
    simple_mtx_lock(&dev->mfx.mutex);
    dev->mfx.last_scaler = scaler;
    dev->mfx.last_output = output;
+   cmd->counts.mfx_scales++;
    mtl_fx_temporal_scaler_encode(scaler->handle, cmd->metal.cmd_buf, &frame);
    simple_mtx_unlock(&dev->mfx.mutex);
 
@@ -817,6 +818,7 @@ kk_mfx_cmd_interpolate(struct kk_cmd_buffer *cmd,
       .depth_reversed = params->flags & KK_MFX_INTERPOLATE_DEPTH_INVERTED,
       .ui_composited = ui && !ui_separate,
    };
+   cmd->counts.mfx_interpolations++;
    mtl_fx_frame_interpolator_encode(interpolator->handle, cmd->metal.cmd_buf,
                                     &frame);
    interpolator->has_prev_color = true;

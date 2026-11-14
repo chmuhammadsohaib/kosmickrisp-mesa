@@ -191,6 +191,7 @@ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
 
    cmd->uploader.bo = NULL;
    cmd->uploader.offset = 0;
+   memset(&cmd->counts, 0, sizeof(cmd->counts));
 
    memset(&cmd->state, 0, sizeof(cmd->state));
    cmd->uses_heap = false;
