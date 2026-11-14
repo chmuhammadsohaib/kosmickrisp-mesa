@@ -2160,6 +2160,10 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
                                    : 0u,
       .icb_id = chunk.resource_id,
    };
+   struct kk_icb_encode_params *params = p.cpu;
+   params->debug = kk_icb_debug_record(
+      dev, data->draw_count, location, chunk.capacity,
+      data->indirect_command.addr, data->predicate_addr[0], params->index_count);
 
    mtl_set_address(cmd->argument_table, p.gpu, 0u);
    mtl_render_set_pipeline_state(enc, dev->icb.encode_pipeline);
@@ -2174,6 +2178,24 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
    mtl_render_execute_commands_indirect(enc, chunk.handle, range);
    cmd->counts.icb_calls++;
+
+   /* KK_ICB_DEBUG: mark the call done once its draws' vertex work is */
+   if (unlikely(params->debug)) {
+      struct kk_ptr m =
+         kk_pool_alloc(cmd, sizeof(struct kk_icb_encode_params), 8u);
+      if (m.gpu) {
+         *(struct kk_icb_encode_params *)m.cpu =
+            (struct kk_icb_encode_params){.mode = 3u, .debug = params->debug};
+         mtl_render_barrier_vertex_writes(enc);
+         mtl_set_address(cmd->argument_table, m.gpu, 0u);
+         mtl_render_set_pipeline_state(enc, dev->icb.encode_pipeline);
+         mtl_draw_primitives(enc, MTL_PRIMITIVE_TYPE_POINT, 0u, 1u, 1u, 0u);
+         mtl_render_set_pipeline_state(enc, vs->pipeline.gfx.render);
+         if (gfx->depth_stencil_state)
+            mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
+         mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
+      }
+   }
 
    if (unlikely(kk_tl_draw_counters))
       p_atomic_inc(&kk_tl_draw_counters[3]);

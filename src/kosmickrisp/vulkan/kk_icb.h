@@ -33,10 +33,33 @@ struct kk_icb_chunk {
    uint32_t used; /* slots written since it was last reset */
 };
 
+/* KK_ICB_DEBUG=1: one record per call in a ring the CPU reads when the
+ * device is lost. The encode pass fills in what it found, a marker draw after
+ * the execution (behind a vertex barrier) sets done: a call encoded but not
+ * done is one whose vertex work never finished. */
+#define KK_ICB_DEBUG_RECORDS 16384u
+
+struct kk_icb_record {
+   uint32_t seq;            /* call number, from 1 */
+   uint32_t max_draws;
+   uint32_t location, capacity;
+   uint64_t args, count;    /* the app's addresses */
+   uint32_t index_count;    /* indices in the bound range, 0 if not indexed */
+   uint32_t encoded;        /* GPU: the encode pass ran */
+   uint32_t draws;          /* GPU: the count it used */
+   uint32_t done;           /* GPU: the marker after the execution ran */
+   uint32_t max_indices;    /* GPU: the largest index (vertex) count */
+   uint32_t max_instances;  /* GPU: the largest instance count */
+   uint32_t max_first;      /* GPU: the largest first index (vertex) */
+   uint32_t pad;
+};
+
 struct kk_icb_device {
    mtl_render_pipeline_state *encode_pipeline;
    simple_mtx_t lock;
    struct util_dynarray free_chunks; /* struct kk_icb_chunk */
+   struct kk_bo *debug_bo;          /* KK_ICB_DEBUG records */
+   uint32_t debug_seq;
 };
 
 /* Per command buffer: the chunks its draws use, until it's reset. Within a
@@ -71,6 +94,7 @@ struct kk_icb_encode_params {
    uint32_t pad;
    uint64_t icb_id;       /* the ICB's gpuResourceID */
    uint32_t range_location, range_length;
+   uint64_t debug;        /* KK_ICB_DEBUG: this call's struct kk_icb_record */
 };
 
 void kk_icb_device_init(struct kk_device *dev);
@@ -89,6 +113,15 @@ kk_icb_cmd_new_pass(struct kk_icb_cmd *icb)
    icb->next_slot = 0u;
    icb->pass_slots = 0u;
 }
+
+/* KK_ICB_DEBUG: a record for a call, or 0 when off */
+uint64_t kk_icb_debug_record(struct kk_device *dev, uint32_t max_draws,
+                             uint32_t location, uint32_t capacity,
+                             uint64_t args, uint64_t count,
+                             uint32_t index_count);
+
+/* KK_ICB_DEBUG: prints the calls that were encoded but never finished */
+void kk_icb_debug_report(struct kk_device *dev);
 
 /* Back to the device's pool (the command buffer is no longer pending) */
 void kk_icb_cmd_release(struct kk_device *dev, struct kk_icb_cmd *icb);

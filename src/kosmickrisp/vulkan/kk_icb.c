@@ -9,6 +9,11 @@
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
+#include "util/u_atomic.h"
+#include "util/u_debug.h"
+
+#include <inttypes.h>
+
 /* One vertex per possible draw. Vertex 0 writes the execution range (the
  * app's count, clamped, or 0 when conditional rendering skips the call); each
  * vertex below the count writes its draw, or resets the slot for an empty one
@@ -20,10 +25,22 @@ static const char kk_icb_encode_msl[] =
    "struct ICBContainer { command_buffer cmds; };\n"
    "struct Encode {\n"
    "   ulong icb, args, count, cond, range, index_buffer;\n"
-   "   uint stride, max_draws, location, mode, prim, cond_inverted, index_count;\n"
+   "   uint stride, max_draws, location, mode, prim, cond_inverted, index_count, pad;\n"
+   "   ulong icb_id;\n"
+   "   uint range_location, range_length;\n"
+   "   ulong debug;\n"
    "};\n"
+   /* struct kk_icb_record's GPU-written words */
+   "struct Record { uint seq, max_draws, location, capacity; ulong args, count;\n"
+   "   uint index_count; atomic_uint encoded, draws, done, max_indices, max_instances, max_first; };\n"
    "vertex void kk_icb_encode(uint vid [[vertex_id]], constant Encode &p [[buffer(0)]])\n"
    "{\n"
+   "   device Record *rec = (device Record *)p.debug;\n"
+   "   if (p.mode == 3u) {\n"
+   "      if (vid == 0u && p.debug != 0ul)\n"
+   "         atomic_store_explicit(&rec->done, 1u, memory_order_relaxed);\n"
+   "      return;\n"
+   "   }\n"
    "   uint n = min(*(device const uint *)p.count, p.max_draws);\n"
    "   if (p.cond != 0ul && ((*(device const uint *)p.cond != 0u) == (p.cond_inverted != 0u)))\n"
    "      n = 0u;\n"
@@ -32,11 +49,20 @@ static const char kk_icb_encode_msl[] =
    "         (device MTLIndirectCommandBufferExecutionRange *)p.range;\n"
    "      r->location = p.location;\n"
    "      r->length = n;\n"
+   "      if (p.debug != 0ul) {\n"
+   "         atomic_store_explicit(&rec->draws, n, memory_order_relaxed);\n"
+   "         atomic_store_explicit(&rec->encoded, 1u, memory_order_relaxed);\n"
+   "      }\n"
    "   }\n"
    "   if (vid >= n)\n"
    "      return;\n"
    "   render_command c(((device ICBContainer *)p.icb)->cmds, p.location + vid);\n"
    "   device const uint *a = (device const uint *)(p.args + ulong(vid) * p.stride);\n"
+   "   if (p.debug != 0ul) {\n"
+   "      atomic_fetch_max_explicit(&rec->max_indices, a[0], memory_order_relaxed);\n"
+   "      atomic_fetch_max_explicit(&rec->max_instances, a[1], memory_order_relaxed);\n"
+   "      atomic_fetch_max_explicit(&rec->max_first, a[2], memory_order_relaxed);\n"
+   "   }\n"
    "   if (a[0] == 0u || a[1] == 0u) {\n"
    "      c.reset();\n"
    "      return;\n"
@@ -67,6 +93,13 @@ kk_icb_device_init(struct kk_device *dev)
    if (!pdev->settings.icb_draws)
       return;
 
+   if (debug_get_bool_option("KK_ICB_DEBUG", false)) {
+      const size_t size = KK_ICB_DEBUG_RECORDS * sizeof(struct kk_icb_record);
+      if (kk_alloc_bo(dev, &dev->vk.base, size, 0, &dev->icb.debug_bo) ==
+          VK_SUCCESS)
+         memset(dev->icb.debug_bo->cpu, 0, size);
+   }
+
    mtl_library *lib = mtl_new_library(
       dev->mtl_compiler_handle, kk_icb_encode_msl, pdev->info.msl_version,
       MTL_MATH_MODE_FAST, MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
@@ -94,6 +127,10 @@ kk_icb_device_finish(struct kk_device *dev)
    util_dynarray_fini(&dev->icb.free_chunks);
    if (dev->icb.encode_pipeline)
       mtl_release(dev->icb.encode_pipeline);
+   if (dev->icb.debug_bo) {
+      kk_icb_debug_report(dev);
+      kk_destroy_bo(dev, dev->icb.debug_bo);
+   }
    simple_mtx_destroy(&dev->icb.lock);
 }
 
@@ -175,4 +212,56 @@ kk_icb_cmd_release(struct kk_device *dev, struct kk_icb_cmd *icb)
    simple_mtx_unlock(&dev->icb.lock);
    util_dynarray_clear(&icb->chunks);
    kk_icb_cmd_new_pass(icb);
+}
+
+uint64_t
+kk_icb_debug_record(struct kk_device *dev, uint32_t max_draws,
+                    uint32_t location, uint32_t capacity, uint64_t args,
+                    uint64_t count, uint32_t index_count)
+{
+   if (!dev->icb.debug_bo)
+      return 0u;
+   uint32_t seq = p_atomic_inc_return(&dev->icb.debug_seq);
+   uint32_t i = (seq - 1u) % KK_ICB_DEBUG_RECORDS;
+   struct kk_icb_record *r = (struct kk_icb_record *)dev->icb.debug_bo->cpu + i;
+   *r = (struct kk_icb_record){
+      .seq = seq,
+      .max_draws = max_draws,
+      .location = location,
+      .capacity = capacity,
+      .args = args,
+      .count = count,
+      .index_count = index_count,
+   };
+   return dev->icb.debug_bo->gpu + i * sizeof(*r);
+}
+
+void
+kk_icb_debug_report(struct kk_device *dev)
+{
+   if (!dev->icb.debug_bo)
+      return;
+   const struct kk_icb_record *r = dev->icb.debug_bo->cpu;
+   uint32_t last = p_atomic_read(&dev->icb.debug_seq), shown = 0u, pending = 0u;
+   uint32_t first = last > KK_ICB_DEBUG_RECORDS ? last - KK_ICB_DEBUG_RECORDS + 1u : 1u;
+   for (uint32_t seq = first; seq <= last; seq++) {
+      const struct kk_icb_record *e = &r[(seq - 1u) % KK_ICB_DEBUG_RECORDS];
+      if (e->seq != seq || e->done)
+         continue;
+      if (!e->encoded) {
+         pending++;
+         continue;
+      }
+      if (shown++ < 32u)
+         fprintf(stderr,
+                 "[kk] icb debug: call %u encoded, not done: %u of %u draws, "
+                 "slots %u+ of %u, largest index count %u, instances %u, "
+                 "first index %u (bound range %u indices), args 0x%" PRIx64
+                 ", count 0x%" PRIx64 "\n",
+                 seq, e->draws, e->max_draws, e->location, e->capacity,
+                 e->max_indices, e->max_instances, e->max_first,
+                 e->index_count, e->args, e->count);
+   }
+   fprintf(stderr, "[kk] icb debug: %u calls recorded, %u encoded but not done, "
+           "%u not encoded yet\n", last, shown, pending);
 }

@@ -344,6 +344,7 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
          fprintf(stderr, "[kk] GPU error: %s (%s); the device is lost\n",
                  mtl_command_queue_error_to_string(data->error),
                  data->error_message ? data->error_message : "no message");
+         kk_icb_debug_report(dev);
          if (dev->atomic64_locks)
             fprintf(stderr, "[kk] 64-bit atomics: %u lanes had given up on a lock\n",
                     p_atomic_read(&((uint32_t *)dev->atomic64_locks->cpu)[KK_ATOMIC64_GIVE_UPS]));
