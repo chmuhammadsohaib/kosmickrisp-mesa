@@ -296,6 +296,7 @@ cs_start_render(struct kk_cmd_buffer *cmd)
 
    cmd->metal.render = mtl_new_render_command_encoder_with_descriptor(
       cmd->metal.cmd_buf, state->render_pass_descriptor);
+   kk_icb_cmd_new_pass(&cmd->icb);
 
    kk_encoder_update_debug(cmd, cmd->metal.render);
    /* Starting a new render pass means we already flushed and no barrier is

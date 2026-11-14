@@ -12,14 +12,15 @@
 /* One vertex per possible draw. Vertex 0 writes the execution range (the
  * app's count, clamped, or 0 when conditional rendering skips the call); each
  * vertex below the count writes its draw, or resets the slot for an empty one
- * so a slot left from earlier use never runs. */
+ * so a slot left from earlier use never runs. Indexed draws are clamped to the
+ * bound index range, as Metal does for the old path's draws (robustness). */
 static const char kk_icb_encode_msl[] =
    "#include <metal_stdlib>\n"
    "using namespace metal;\n"
    "struct ICBContainer { command_buffer cmds; };\n"
    "struct Encode {\n"
    "   ulong icb, args, count, cond, range, index_buffer;\n"
-   "   uint stride, max_draws, location, mode, prim, cond_inverted;\n"
+   "   uint stride, max_draws, location, mode, prim, cond_inverted, index_count;\n"
    "};\n"
    "vertex void kk_icb_encode(uint vid [[vertex_id]], constant Encode &p [[buffer(0)]])\n"
    "{\n"
@@ -41,12 +42,19 @@ static const char kk_icb_encode_msl[] =
    "      return;\n"
    "   }\n"
    "   primitive_type prim = primitive_type(p.prim);\n"
-   "   if (p.mode == 0u)\n"
+   "   if (p.mode == 0u) {\n"
    "      c.draw_primitives(prim, a[2], a[0], a[1], a[3]);\n"
-   "   else if (p.mode == 1u)\n"
-   "      c.draw_indexed_primitives(prim, a[0], (device const ushort *)p.index_buffer + a[2], a[1], a[3], a[4]);\n"
+   "      return;\n"
+   "   }\n"
+   "   if (a[2] >= p.index_count) {\n"
+   "      c.reset();\n"
+   "      return;\n"
+   "   }\n"
+   "   uint indices = min(a[0], p.index_count - a[2]);\n"
+   "   if (p.mode == 1u)\n"
+   "      c.draw_indexed_primitives(prim, indices, (device const ushort *)p.index_buffer + a[2], a[1], a[3], a[4]);\n"
    "   else\n"
-   "      c.draw_indexed_primitives(prim, a[0], (device const uint *)p.index_buffer + a[2], a[1], a[3], a[4]);\n"
+   "      c.draw_indexed_primitives(prim, indices, (device const uint *)p.index_buffer + a[2], a[1], a[3], a[4]);\n"
    "}\n";
 
 void
@@ -121,25 +129,30 @@ kk_icb_get_chunk(struct kk_device *dev, uint32_t slots,
 
 bool
 kk_icb_reserve(struct kk_cmd_buffer *cmd, uint32_t count,
-               struct kk_icb_chunk *chunk)
+               struct kk_icb_chunk *chunk, uint32_t *location)
 {
    struct kk_icb_cmd *icb = &cmd->icb;
+   if (count > KK_ICB_PASS_SLOTS - icb->pass_slots)
+      return false;
+
    unsigned n = util_dynarray_num_elements(&icb->chunks, struct kk_icb_chunk);
-   if (n) {
-      struct kk_icb_chunk *last =
-         util_dynarray_element(&icb->chunks, struct kk_icb_chunk, n - 1);
-      if (last->capacity >= count) {
-         *chunk = *last;
-         return true;
+   for (; icb->chunk < n; icb->chunk++, icb->next_slot = 0u) {
+      struct kk_icb_chunk *c =
+         util_dynarray_element(&icb->chunks, struct kk_icb_chunk, icb->chunk);
+      if (c->capacity - icb->next_slot >= count) {
+         *chunk = *c;
+         break;
       }
    }
+   if (icb->chunk == n) {
+      if (!kk_icb_get_chunk(kk_cmd_buffer_device(cmd), count, chunk))
+         return false;
+      util_dynarray_append(&icb->chunks, *chunk);
+   }
 
-   /* Earlier calls keep the smaller one until the command buffer is reset */
-   struct kk_icb_chunk bigger;
-   if (!kk_icb_get_chunk(kk_cmd_buffer_device(cmd), count, &bigger))
-      return false;
-   util_dynarray_append(&icb->chunks, bigger);
-   *chunk = bigger;
+   *location = icb->next_slot;
+   icb->next_slot += count;
+   icb->pass_slots += count;
    return true;
 }
 
@@ -152,5 +165,5 @@ kk_icb_cmd_release(struct kk_device *dev, struct kk_icb_cmd *icb)
    util_dynarray_append_dynarray(&dev->icb.free_chunks, &icb->chunks);
    simple_mtx_unlock(&dev->icb.lock);
    util_dynarray_clear(&icb->chunks);
-   icb->executed = false;
+   kk_icb_cmd_new_pass(icb);
 }

@@ -2086,9 +2086,13 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
                           data->index_buffer_el_size_B != 4u)))
       return false;
 
+   /* The render pass starts (and resets the ICB slots) before reserving */
+   mtl_render_encoder *enc = cs_get_render(cmd);
    struct kk_icb_chunk chunk;
+   uint32_t location;
    struct kk_ptr p = kk_pool_alloc(cmd, sizeof(struct kk_icb_encode_params), 8u);
-   if (unlikely(!p.gpu) || !kk_icb_reserve(cmd, data->draw_count, &chunk))
+   if (unlikely(!p.gpu) ||
+       !kk_icb_reserve(cmd, data->draw_count, &chunk, &location))
       return false;
 
    bool cond = data->predicate_count > 1;
@@ -2103,19 +2107,19 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
       .index_buffer = data->indexed ? data->index_buffer.addr : 0u,
       .stride = data->indirect_command.stride,
       .max_draws = data->draw_count,
-      .location = 0u,
+      .location = location,
       .mode = !data->indexed                          ? 0u
               : data->index_buffer_el_size_B == 2u ? 1u
                                                    : 2u,
       .prim = mesa_prim_to_mtl_primitive_type(data->prim),
       .cond_inverted = cond && data->predicate_op[1] == KK_PREDICATE_EQ_ZERO,
+      .index_count = data->indexed ? (uint32_t)MIN2(data->index_buffer.range /
+                                                    data->index_buffer_el_size_B,
+                                                    UINT32_MAX)
+                                   : 0u,
       .icb_id = chunk.resource_id,
    };
 
-   mtl_render_encoder *enc = cs_get_render(cmd);
-   /* The previous call's draws have launched before this one rewrites them */
-   if (cmd->icb.executed)
-      mtl_render_barrier_vertex_writes(enc);
    mtl_set_address(cmd->argument_table, p.gpu, 0u);
    mtl_render_set_pipeline_state(enc, dev->icb.encode_pipeline);
    mtl_draw_primitives(enc, MTL_PRIMITIVE_TYPE_POINT, 0u, data->draw_count, 1u,
@@ -2128,7 +2132,6 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
       mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
    mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
    mtl_render_execute_commands_indirect(enc, chunk.handle, range);
-   cmd->icb.executed = true;
    cmd->counts.icb_calls++;
 
    if (unlikely(kk_tl_draw_counters))
