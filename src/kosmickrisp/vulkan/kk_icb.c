@@ -154,10 +154,10 @@ kk_icb_get_chunk(struct kk_device *dev, uint32_t slots,
    }
    simple_mtx_unlock(&dev->icb.lock);
 
-   /* KK_ICB_CHUNK_SLOTS (testing): bigger chunks, so calls start deep in one */
-   uint32_t capacity =
-      MAX2(slots, (uint32_t)debug_get_num_option("KK_ICB_CHUNK_SLOTS",
-                                                 KK_ICB_CHUNK_SLOTS));
+   /* KK_ICB_CHUNK_SLOTS (testing) overrides the size */
+   uint32_t unit = (uint32_t)debug_get_num_option("KK_ICB_CHUNK_SLOTS",
+                                                  KK_ICB_CHUNK_SLOTS);
+   uint32_t capacity = MAX2(DIV_ROUND_UP(slots, unit), 1u) * unit;
    out->handle = mtl_new_indirect_command_buffer(dev->mtl_handle, capacity,
                                                  &out->resource_id);
    if (!out->handle)

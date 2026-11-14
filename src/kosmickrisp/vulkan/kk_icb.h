@@ -21,8 +21,11 @@ struct kk_cmd_buffer;
  * with that count as its range: no Metal draw per possible draw, no compute
  * pass that splits the render pass. */
 
-/* Slots in a pooled ICB; calls with more possible draws get one of their own */
-#define KK_ICB_CHUNK_SLOTS 4096u
+/* Slots in a pooled ICB; calls with more possible draws get one of their own,
+ * also a multiple of this size. DOOM: The Dark Ages timed the GPU out within a
+ * minute while its calls of about 6800 draws had ICBs sized to them, and ran
+ * clean with every ICB 8192 slots; odd sizes never reproduced natively. */
+#define KK_ICB_CHUNK_SLOTS 8192u
 /* Slots one render pass may use (about 45 MB); later calls take the old path */
 #define KK_ICB_PASS_SLOTS 65536u
 
