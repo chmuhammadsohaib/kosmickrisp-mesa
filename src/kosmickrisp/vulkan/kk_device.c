@@ -404,11 +404,13 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    kk_mfx_init(dev);
 
    if (pdev->settings.atomic64_emulation) {
-      result = kk_alloc_bo(dev, &dev->vk.base, KK_ATOMIC64_LOCK_COUNT * 4u, 0,
+      /* The locks, then the give-up count */
+      result = kk_alloc_bo(dev, &dev->vk.base,
+                           (KK_ATOMIC64_LOCK_COUNT + 1u) * 4u, 0,
                            &dev->atomic64_locks);
       if (result != VK_SUCCESS)
          goto fail_vab_memory;
-      memset(dev->atomic64_locks->cpu, 0, KK_ATOMIC64_LOCK_COUNT * 4u);
+      memset(dev->atomic64_locks->cpu, 0, (KK_ATOMIC64_LOCK_COUNT + 1u) * 4u);
    }
 
    kk_tl_init_device(dev);
@@ -568,8 +570,14 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    kk_device_finish_as_slots(dev);
    if (dev->sparse_unmap_bo)
       kk_destroy_bo(dev, dev->sparse_unmap_bo);
-   if (dev->atomic64_locks)
+   if (dev->atomic64_locks) {
+      uint32_t give_ups =
+         ((uint32_t *)dev->atomic64_locks->cpu)[KK_ATOMIC64_GIVE_UPS];
+      if (give_ups)
+         fprintf(stderr, "[kk] 64-bit atomics: %u lanes gave up on a lock\n",
+                 give_ups);
       kk_destroy_bo(dev, dev->atomic64_locks);
+   }
    if (dev->clock_counter)
       kk_destroy_bo(dev, dev->clock_counter);
    kk_icb_device_finish(dev);

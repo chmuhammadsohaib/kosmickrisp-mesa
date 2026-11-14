@@ -1017,7 +1017,13 @@ atomic_op_to_msl(nir_atomic_op op)
  * kk_atomic64_combine is for add/and/or/xor whose old value isn't used: when
  * every active lane of the SIMD group targets one address (counters), the lanes
  * combine their operands and one of them does the locked operation, instead of
- * 32 waiting on one lock. */
+ * 32 waiting on one lock.
+ *
+ * A lane that waits KK_A64_SPIN_LIMIT rounds gives up instead of keeping the
+ * GPU until Metal times it out: it returns the value it reads (a compare-
+ * exchange reports failure) and counts itself in the word after the lock table
+ * (KK_ATOMIC64_GIVE_UPS), which the driver prints. Waits that long only happen
+ * when something has gone wrong; the count tells whether it was this. */
 static const char kk_atomic64_helper[] =
    /* MSL 4.1 orders the lock itself: acquire when taken, release when given
     * back, so what the previous holder wrote is visible to the next. Before
@@ -1032,6 +1038,7 @@ static const char kk_atomic64_helper[] =
    "#define KK_A64_UNLOCK(lk, v) atomic_store_explicit(lk, v, memory_order_relaxed)\n"
    "#define KK_A64_FENCE() atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device)\n"
    "#endif\n"
+   "#define KK_A64_SPIN_LIMIT (1u << 20)\n"
    "static inline ulong kk_atomic64_rmw(device ulong *p, device atomic_uint *locks, uint op, ulong a, ulong cmp)\n"
    "{\n"
    "    ulong addr = (ulong)p;\n"
@@ -1040,6 +1047,7 @@ static const char kk_atomic64_helper[] =
    "    device atomic_uint *w = (device atomic_uint *)p;\n"
    "    bool done = false;\n"
    "    ulong old = 0;\n"
+   "    uint spins = 0u;\n"
    "    do {\n"
    /* A compare-exchange that will fail needs no lock: while waiting for it,
     * read the value (high half on both sides of the low one, so a write in
@@ -1084,6 +1092,15 @@ static const char kk_atomic64_helper[] =
    "                KK_A64_UNLOCK(lk, s + 2u);\n"
    "                done = true;\n"
    "            }\n"
+   "        }\n"
+   "        if (!done && ++spins == KK_A64_SPIN_LIMIT) {\n"
+   "            uint lo = atomic_fetch_or_explicit(&w[0], 0u, memory_order_relaxed);\n"
+   "            uint hi = atomic_fetch_or_explicit(&w[1], 0u, memory_order_relaxed);\n"
+   "            old = as_type<ulong>(uint2(lo, hi));\n"
+   "            if (op == 1u && old == cmp)\n"
+   "                old = ~cmp;\n"
+   "            atomic_fetch_add_explicit(&locks[65536], 1u, memory_order_relaxed);\n"
+   "            done = true;\n"
    "        }\n"
    "    } while (simd_any(!done));\n"
    "    return old;\n"
