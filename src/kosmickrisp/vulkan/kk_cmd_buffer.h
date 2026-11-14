@@ -281,6 +281,12 @@ struct kk_cmd_buffer {
    /* Owned large BOs */
    struct util_dynarray large_bos;
    struct kk_icb_cmd icb;
+   /* What the command buffer records, for KK_SYNC_DEBUG's report of one the
+    * GPU fails (kk_queue.c) */
+   struct {
+      uint32_t draws, icb_calls, dispatches, traces, as_builds, mfx_scales,
+         mfx_interpolations;
+   } counts;
    /* Ray tracing stacks (struct kk_bo *), given back to the device on reset */
    struct util_dynarray rt_stacks;
 

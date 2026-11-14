@@ -175,3 +175,9 @@ mtl_new_indirect_command_buffer(mtl_device *dev, uint32_t max_count,
 {
    return NULL;
 }
+
+void
+mtl_indirect_command_buffer_reset(mtl_indirect_command_buffer *icb,
+                                  uint32_t location, uint32_t count)
+{
+}

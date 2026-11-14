@@ -503,6 +503,7 @@ kk_cmd_trace_rays(struct kk_cmd_buffer *cmd,
    if (!link)
       return;
 
+   cmd->counts.traces++;
    const uint64_t launch = (uint64_t)width * height * depth;
    const uint32_t threads =
       indirect_addr ? KK_RT_MAX_THREADS

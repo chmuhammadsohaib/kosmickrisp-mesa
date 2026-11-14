@@ -20,6 +20,9 @@
 #define KK_MAX_DYNAMIC_BUFFERS           64
 /* Locks for KK_ATOMIC64_EMULATION (a power of two; addresses hash into it) */
 #define KK_ATOMIC64_LOCK_COUNT           65536
+/* The word after the locks counts lanes that waited unusually long for a lock
+ * (kk_atomic64_rmw) */
+#define KK_ATOMIC64_GIVE_UPS             KK_ATOMIC64_LOCK_COUNT
 #define KK_MAX_RTS                       8
 #define KK_MAX_SAMPLES                   8
 #define KK_MIN_SSBO_ALIGNMENT            16

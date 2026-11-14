@@ -65,6 +65,7 @@ kk_files = files(
   'kk_cmd_dispatch.c',
   'kk_cmd_draw.c',
   'kk_icb.c',
+  'kk_dispatch_trace.c',
   'kk_cmd_meta.c',
   'kk_cmd_pool.h',
   'kk_cmd_pool.c',

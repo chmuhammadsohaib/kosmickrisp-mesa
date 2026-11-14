@@ -161,6 +161,10 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
 
 extern const struct vk_device_shader_ops kk_device_shader_ops;
 
+/* The stage's MSL in a file (debugging) */
+bool kk_shader_write_msl(const struct kk_shader *shader, mesa_shader_stage stage,
+                         const char *path);
+
 /* kk_rt_pipeline.c */
 struct kk_device;
 VkResult kk_rt_register_shader(struct kk_device *dev, struct kk_shader *shader);

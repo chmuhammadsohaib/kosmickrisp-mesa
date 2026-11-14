@@ -21,14 +21,15 @@ Most additions are opt-in with environment variables, so with none set the drive
 | lower fp64 to software | 64-bit floats in shaders (Metal has none), lowered to software | |
 | metalfx upscaling over VK_NVX_binary_import | A private channel over `VK_NVX_binary_import` and `VK_NVX_image_view_handle` that runs MetalFX's temporal upscaler (with sharpening and dynamic resolution); a device LUID. A DLSS or FSR runtime on the Windows side drives it, see `src/kosmickrisp/vulkan/kk_mfx_channel.h` | `KK_NVX=1`, `KK_MFX_SIGNS`, `KK_MFX_CONTENT_MODE`, `KK_MFX_CONTENT_SCALES` |
 | msl translation fixes | SSA values declared in the scope that defines them, compressed MSL kept for compiled shaders, `shader_clock` | |
-| KK_SYNC_DEBUG reports stalled waits | Says what the queues have done whenever a CPU wait stalls | `KK_SYNC_DEBUG=1` |
+| KK_SYNC_DEBUG reports stalled waits | Says what the queues have done whenever a CPU wait stalls, and what a command buffer that failed had recorded | `KK_SYNC_DEBUG=1` |
 | metalfx frame interpolation | MetalFX's frame interpolator over the same channel (frame generation) | `KK_NVX=1` |
 | KK_QUEUE_COUNT for more queues | Up to four queues in the main queue family | `KK_QUEUE_COUNT=n` |
 | always enable the nvx extensions under KK_NVX | The channel's extensions on every device, for games that don't ask for them | `KK_NVX=1` |
 | device local memory type that isn't host visible | A regular `DEVICE_LOCAL`-only memory type, which AMD's FidelityFX runtime needs | `KK_DEVICE_LOCAL_TYPE=0` turns it off |
 | compute queue families | Up to two compute and transfer queue families, for engines that want a family of their own for async compute | `KK_COMPUTE_QUEUES=n[,m]` |
 | wsi/metal: rgba8 swapchains | `R8G8B8A8` swapchains, presented through a BGRA8 layer | |
-| emulated 64-bit buffer atomics | `shaderBufferInt64Atomics` through a lock table, since Metal has no 64-bit atomic add, exchange or compare-exchange (DOOM: The Dark Ages' ray tracing needs it) | `KK_ATOMIC64_EMULATION=1` |
+| emulated 64-bit buffer atomics | `shaderBufferInt64Atomics` through a lock table, since Metal has no 64-bit atomic add, exchange or compare-exchange (DOOM: The Dark Ages' ray tracing needs it); a compare-exchange that will fail skips the lock | `KK_ATOMIC64_EMULATION=1` |
+| gpu timeout post-mortems | Records every GPU-built draw call or compute dispatch, so a GPU timeout names the one that never finished, with its size and shader; logs the kinds of GPU-built calls a game makes | `KK_ICB_DEBUG`, `KK_DISPATCH_DEBUG`, `KK_ICB_LOG`, `KK_ICB_SHADOW`, `KK_ICB_DRAWS_MAX`, `KK_ICB_CHUNK_SLOTS` |
 
 ## Performance
 
@@ -39,10 +40,11 @@ Most additions are opt-in with environment variables, so with none set the drive
 - Less CPU per frame: dynamic depth/stencil states are cached, the residency set is only committed when it changes,
   sparse binds are batched, waits on any of several semaphores sleep instead of polling.
 - MetalFX objects are freed when FSR or DLSS is turned off and when the output resolution changes.
-- Indirect-count draws (`vkCmdDraw*IndirectCount`) are built on the GPU: a pass inside the render pass writes the
-  draws the count asks for into a Metal indirect command buffer, instead of one Metal draw per possible draw and a
-  compute pass that splits the render pass (DOOM: The Dark Ages: ~12k instead of ~400k Metal draws a second at its
-  menu). `KK_ICB_DRAWS=0` keeps the old path.
+- Indirect-count draws (`vkCmdDraw*IndirectCount`) can be built on the GPU (`KK_ICB_DRAWS=1`): a pass inside the
+  render pass writes the draws the count asks for into a Metal indirect command buffer, instead of one Metal draw per
+  possible draw and a compute pass that splits the render pass (DOOM: The Dark Ages: ~12k instead of ~400k Metal
+  draws a second at its menu, ~37 instead of ~29 fps in game). Off by default: it still times the GPU out in Dark
+  Ages now and then, and the cause isn't known yet.
 - Device-local memory the host can't see is Metal private storage, so render targets and textures there can be
   compressed losslessly (`KK_PRIVATE_DEVICE_LOCAL=0` keeps it shared).
 

@@ -10,6 +10,7 @@
 
 #include "kk_private.h"
 
+#include "kk_dispatch_trace.h"
 #include "kk_icb.h"
 #include "kk_mfx.h"
 #include "kk_query_table.h"
@@ -177,6 +178,7 @@ struct kk_device {
    struct kk_bo *atomic64_locks;
    struct kk_bo *clock_counter;
    struct kk_icb_device icb;
+   struct kk_dispatch_trace dispatch_trace;
 
    /* Geomtry heap */
    struct kk_bo *heap;

@@ -638,6 +638,7 @@ kk_CmdBuildAccelerationStructuresKHR(
    const VkAccelerationStructureBuildRangeInfoKHR *const *ppBuildRangeInfos)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->counts.as_builds += infoCount;
 
    const bool stats = kk_cmd_buffer_device(cmd)->rt_stats != NULL;
    int32_t stats_pair = -1;
