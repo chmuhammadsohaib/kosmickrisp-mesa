@@ -415,6 +415,7 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    kk_tl_init_device(dev);
    kk_icb_device_init(dev);
+   kk_dispatch_trace_init(dev);
 
    if (pdev->settings.shader_clock) {
       result = kk_alloc_bo(dev, &dev->vk.base, 64u, 0, &dev->clock_counter);
@@ -520,6 +521,7 @@ fail_vab_memory:
    if (dev->clock_counter)
       kk_destroy_bo(dev, dev->clock_counter);
    kk_icb_device_finish(dev);
+   kk_dispatch_trace_finish(dev);
    kk_mfx_finish(dev);
    kk_device_finish_rt(dev);
    kk_device_finish_rt_stacks(dev);
@@ -582,6 +584,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (dev->clock_counter)
       kk_destroy_bo(dev, dev->clock_counter);
    kk_icb_device_finish(dev);
+   kk_dispatch_trace_finish(dev);
 
    /* Geometry heap */
    if (dev->heap)

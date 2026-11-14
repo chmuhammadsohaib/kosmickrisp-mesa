@@ -99,10 +99,13 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
 
       kk_predicate_compute(cmd, patched.gpu, patched.gpu);
 
+      uint64_t trace = kk_dispatch_trace_begin(
+         cmd, cs, (uint32_t[3]){0, 0, 0}, patched.gpu);
       /* Flush compute state after predication dispatch */
       kk_flush_compute_state(cmd);
       mtl_dispatch_threadgroups_with_indirect_buffer(encoder, patched.gpu,
                                                      local_size);
+      kk_dispatch_trace_end(cmd, trace);
    } else {
       struct mtl_size grid_size = {
          .x = groupCountX * local_size.x,
@@ -110,8 +113,11 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
          .z = groupCountZ * local_size.z,
       };
 
+      uint64_t trace = kk_dispatch_trace_begin(
+         cmd, cs, (uint32_t[3]){groupCountX, groupCountY, groupCountZ}, 0u);
       kk_flush_compute_state(cmd);
       mtl_dispatch_threads(encoder, grid_size, local_size);
+      kk_dispatch_trace_end(cmd, trace);
    }
 }
 
@@ -143,13 +149,19 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
 
       kk_predicate_compute(cmd, patched.gpu, pInfo->addressRange.address);
 
+      uint64_t trace = kk_dispatch_trace_begin(
+         cmd, cs, (uint32_t[3]){0, 0, 0}, patched.gpu);
       /* Flush compute state after predication dispatch */
       kk_flush_compute_state(cmd);
       mtl_dispatch_threadgroups_with_indirect_buffer(encoder, patched.gpu,
                                                      local_size);
+      kk_dispatch_trace_end(cmd, trace);
    } else {
+      uint64_t trace = kk_dispatch_trace_begin(
+         cmd, cs, (uint32_t[3]){0, 0, 0}, pInfo->addressRange.address);
       kk_flush_compute_state(cmd);
       mtl_dispatch_threadgroups_with_indirect_buffer(
          encoder, pInfo->addressRange.address, local_size);
+      kk_dispatch_trace_end(cmd, trace);
    }
 }
