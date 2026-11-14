@@ -2074,6 +2074,11 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
  * reproduce a game's calls in a test */
 DEBUG_GET_ONCE_BOOL_OPTION(kk_icb_log, "KK_ICB_LOG", false)
 
+/* KK_ICB_SHADOW=1 (bisecting): calls are encoded as usual but not executed;
+ * the old path draws them, so rendering stays right while the encode side
+ * (its pass, barriers and state switches) still runs */
+DEBUG_GET_ONCE_BOOL_OPTION(kk_icb_shadow, "KK_ICB_SHADOW", false)
+
 static void
 kk_icb_log_call(const struct kk_draw_command *data, uint32_t location,
                 uint32_t pass_slots)
@@ -2176,6 +2181,8 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    if (gfx->depth_stencil_state)
       mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
    mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
+   if (unlikely(debug_get_option_kk_icb_shadow()))
+      return false;
    mtl_render_execute_commands_indirect(enc, chunk.handle, range);
    cmd->counts.icb_calls++;
 
