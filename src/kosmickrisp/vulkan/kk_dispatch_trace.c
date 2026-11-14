@@ -15,6 +15,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Mode 0 starts a record (copying 3 group counts from src when it isn't 0),
  * mode 1 finishes it */
@@ -160,13 +161,23 @@ kk_dispatch_trace_report(struct kk_device *dev)
          pending++;
          continue;
       }
-      if (running++ < 16u)
+      if (running++ < 16u) {
+         /* The shader object outlives the lost device until the app destroys it */
+         char path[512] = "";
+         const char *home = getenv("HOME");
+         if (home)
+            snprintf(path, sizeof(path), "%s/kk-hung-dispatch-%u.metal", home, seq);
+         bool saved = path[0] &&
+                      kk_shader_write_msl((const struct kk_shader *)(uintptr_t)e->shader,
+                                          MESA_SHADER_COMPUTE, path);
          fprintf(stderr,
                  "[kk] dispatch debug: dispatch %u started, not done: %s %u x %u x %u "
-                 "groups of %u x %u x %u, shader 0x%" PRIx64 "\n",
+                 "groups of %u x %u x %u, shader 0x%" PRIx64 "%s%s\n",
                  seq, e->indirect ? "indirect" : "direct", e->groups[0],
                  e->groups[1], e->groups[2], e->local[0], e->local[1],
-                 e->local[2], e->shader);
+                 e->local[2], e->shader, saved ? ", MSL in " : "",
+                 saved ? path : "");
+      }
    }
    fprintf(stderr, "[kk] dispatch debug: %u dispatches recorded, %u started but "
            "not done, %u not started\n", last, running, pending);

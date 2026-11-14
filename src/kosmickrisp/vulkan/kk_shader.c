@@ -1895,6 +1895,21 @@ kk_msl_code(const struct msl_compile_data *data, char **unpacked)
 #endif
 }
 
+bool
+kk_shader_write_msl(const struct kk_shader *shader, mesa_shader_stage stage,
+                    const char *path)
+{
+   char *unpacked;
+   const char *code = kk_msl_code(&shader->msl_data[stage], &unpacked);
+   FILE *file = code ? fopen(path, "w") : NULL;
+   if (file) {
+      fputs(code, file);
+      fclose(file);
+   }
+   free(unpacked);
+   return file != NULL;
+}
+
 static VkResult
 kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
