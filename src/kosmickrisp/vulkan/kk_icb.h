@@ -15,7 +15,7 @@
 struct kk_device;
 struct kk_cmd_buffer;
 
-/* KK_ICB_DRAWS (on by default): vkCmdDraw*IndirectCount as GPU-built draws.
+/* KK_ICB_DRAWS (off by default): vkCmdDraw*IndirectCount as GPU-built draws.
  * A rasterization-off vertex pass in the render pass writes the draws the
  * count buffer asks for into an indirect command buffer, then the ICB runs
  * with that count as its range: no Metal draw per possible draw, no compute
