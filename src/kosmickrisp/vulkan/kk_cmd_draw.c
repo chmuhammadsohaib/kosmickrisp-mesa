@@ -28,6 +28,8 @@ extern uint64_t kk_tl_draw_stats_gpu;
 #include "poly/geometry.h"
 #include "poly/tessellator.h"
 
+#include "util/simple_mtx.h"
+#include "util/u_debug.h"
 #include "vulkan/runtime/vk_render_pass.h"
 #include "vulkan/util/vk_format.h"
 
@@ -2068,6 +2070,42 @@ build_draw_data(struct kk_cmd_buffer *cmd, struct kk_draw_command *data,
  * indirect command buffer and the ICB runs with that count as its range, all
  * inside the render pass. Draws that need per-draw data, unrolling,
  * tessellation, geometry emulation or multiview keep the old path. */
+/* KK_ICB_LOG=1: each kind of call that becomes GPU-built draws, once, to
+ * reproduce a game's calls in a test */
+DEBUG_GET_ONCE_BOOL_OPTION(kk_icb_log, "KK_ICB_LOG", false)
+
+static void
+kk_icb_log_call(const struct kk_draw_command *data, uint32_t location,
+                uint32_t pass_slots)
+{
+   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
+   static uint64_t seen[256];
+   static unsigned seen_count, calls;
+   const uint64_t key = (uint64_t)data->draw_count << 32 |
+                        data->indirect_command.stride << 12 |
+                        data->prim << 5 | data->index_buffer_el_size_B << 1 |
+                        (data->predicate_count > 1);
+
+   simple_mtx_lock(&lock);
+   calls++;
+   bool fresh = true;
+   for (unsigned i = 0; i < seen_count && fresh; i++)
+      fresh = seen[i] != key;
+   if (fresh && seen_count < ARRAY_SIZE(seen)) {
+      seen[seen_count++] = key;
+      fprintf(stderr,
+              "[kk] icb call #%u: max %u draws, stride %u, %s%s, prim %u, "
+              "conditional %s, slots %u-%u, pass now %u slots\n",
+              calls, data->draw_count, data->indirect_command.stride,
+              data->indexed ? "indexed " : "non-indexed",
+              !data->indexed ? ""
+              : data->index_buffer_el_size_B == 2u ? "16-bit" : "32-bit",
+              data->prim, data->predicate_count > 1 ? "yes" : "no", location,
+              location + data->draw_count - 1u, pass_slots);
+   }
+   simple_mtx_unlock(&lock);
+}
+
 static bool
 kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
 {
@@ -2094,6 +2132,9 @@ kk_icb_draw(struct kk_cmd_buffer *cmd, struct kk_draw_command *data)
    if (unlikely(!p.gpu) ||
        !kk_icb_reserve(cmd, data->draw_count, &chunk, &location))
       return false;
+
+   if (unlikely(debug_get_option_kk_icb_log()))
+      kk_icb_log_call(data, location, cmd->icb.pass_slots);
 
    bool cond = data->predicate_count > 1;
    uint64_t range =
