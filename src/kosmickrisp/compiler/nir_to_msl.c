@@ -1019,11 +1019,11 @@ atomic_op_to_msl(nir_atomic_op op)
  * combine their operands and one of them does the locked operation, instead of
  * 32 waiting on one lock.
  *
- * A lane that waits KK_A64_SPIN_LIMIT rounds gives up instead of keeping the
- * GPU until Metal times it out: it returns the value it reads (a compare-
- * exchange reports failure) and counts itself in the word after the lock table
- * (KK_ATOMIC64_GIVE_UPS), which the driver prints. Waits that long only happen
- * when something has gone wrong; the count tells whether it was this. */
+ * A lane that has waited KK_A64_SPIN_LIMIT rounds counts itself, once, in the
+ * word after the lock table (KK_ATOMIC64_GIVE_UPS) and keeps waiting: heavy
+ * but legitimate contention gets there too, so giving up would break the
+ * operation. The driver prints the count when the device is lost, which tells
+ * whether a GPU timeout had lanes stuck on a lock. */
 static const char kk_atomic64_helper[] =
    /* MSL 4.1 orders the lock itself: acquire when taken, release when given
     * back, so what the previous holder wrote is visible to the next. Before
@@ -1093,15 +1093,8 @@ static const char kk_atomic64_helper[] =
    "                done = true;\n"
    "            }\n"
    "        }\n"
-   "        if (!done && ++spins == KK_A64_SPIN_LIMIT) {\n"
-   "            uint lo = atomic_fetch_or_explicit(&w[0], 0u, memory_order_relaxed);\n"
-   "            uint hi = atomic_fetch_or_explicit(&w[1], 0u, memory_order_relaxed);\n"
-   "            old = as_type<ulong>(uint2(lo, hi));\n"
-   "            if (op == 1u && old == cmp)\n"
-   "                old = ~cmp;\n"
+   "        if (!done && ++spins == KK_A64_SPIN_LIMIT)\n"
    "            atomic_fetch_add_explicit(&locks[65536], 1u, memory_order_relaxed);\n"
-   "            done = true;\n"
-   "        }\n"
    "    } while (simd_any(!done));\n"
    "    return old;\n"
    "}\n\n"

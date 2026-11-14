@@ -346,7 +346,7 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
                  data->error_message ? data->error_message : "no message");
          kk_icb_debug_report(dev);
          if (dev->atomic64_locks)
-            fprintf(stderr, "[kk] 64-bit atomics: %u lanes had given up on a lock\n",
+            fprintf(stderr, "[kk] 64-bit atomics: %u lanes had waited over 2^20 rounds for a lock\n",
                     p_atomic_read(&((uint32_t *)dev->atomic64_locks->cpu)[KK_ATOMIC64_GIVE_UPS]));
          if (dev->sync_debug.enabled && kk_sync_ring.init)
             kk_sync_ring_report();

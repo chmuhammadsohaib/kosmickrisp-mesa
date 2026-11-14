@@ -574,7 +574,8 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       uint32_t give_ups =
          ((uint32_t *)dev->atomic64_locks->cpu)[KK_ATOMIC64_GIVE_UPS];
       if (give_ups)
-         fprintf(stderr, "[kk] 64-bit atomics: %u lanes gave up on a lock\n",
+         fprintf(stderr,
+                 "[kk] 64-bit atomics: %u lanes waited over 2^20 rounds for a lock\n",
                  give_ups);
       kk_destroy_bo(dev, dev->atomic64_locks);
    }
